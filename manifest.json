@@ -1,0 +1,82 @@
+{
+  "manifest_version": 3,
+  "name": "Arizona Logs & Player Helper",
+  "version": "2.0.0",
+  "description": "Комбинирует авторазбиение периодов на arizonarp.logsparser.info и расширенные инструменты для logs.shinoa.tech.",
+  "permissions": ["storage", "downloads"],
+  "host_permissions": [
+    "https://arizonarp.logsparser.info/*",
+    "https://logs.shinoa.tech/*",
+    "https://items.shinoa.tech/*",
+    "https://cdn.azresources.cloud/*",
+    "https://admin.arztools.tech/*",
+    "https://forum.arizona-rp.com/*",
+    "http://ip-api.com/*"
+  ],
+  "background": {
+    "service_worker": "shinoa-service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://arizonarp.logsparser.info/*"],
+      "js": ["logs-limit-prefetch.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://arizonarp.logsparser.info/*"],
+      "js": ["content.js", "suspicious-deals.js"],
+      "css": ["styles.css"],
+      "run_at": "document_end",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://arizonarp.logsparser.info/admins*"],
+      "js": ["forum-report/forum-report.js", "admins-report.js"],
+      "run_at": "document_end",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://logs.shinoa.tech/*"],
+      "js": ["shinoa-content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://items.shinoa.tech/*"],
+      "js": ["shinoa-items-content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "prices.jsonl",
+        "currency_config.json",
+        "vehicle_prices.jsonl",
+        "custom_prices.json",
+        "forum-config.json"
+      ],
+      "matches": [
+        "https://arizonarp.logsparser.info/*",
+        "https://items.shinoa.tech/*"
+      ]
+    },
+    {
+      "resources": ["shinoa-page-interceptor.js"],
+      "matches": ["https://logs.shinoa.tech/*"]
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

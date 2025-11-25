@@ -1,0 +1,47 @@
+{
+  "serverTitle": "Arizona Mobile 3",
+  "showRewards": false,
+  "rewardReportsStep": 500,
+  "rewardAmountPerStep": 190,
+  "dailyNormHours": 3,
+  "groups": [
+    {
+      "key": "sostNesost",
+      "title": "Сост / Несост",
+      "forums": [
+        {
+          "id": 2389,
+          "title": "Жалобы на игроков состоящих в гос.организациях"
+        },
+        {
+          "id": 2388,
+          "title": "Жалобы на игроков не сост. в организациях"
+        }
+      ]
+    },
+    {
+      "key": "mafiasBands",
+      "title": "Мафии / Банды",
+      "forums": [
+        {
+          "id": 2391,
+          "title": "Жалобы на мафии"
+        },
+        {
+          "id": 2392,
+          "title": "Жалобы на бандитов"
+        }
+      ]
+    },
+    {
+      "key": "slets",
+      "title": "Слёты",
+      "forums": [
+        {
+          "id": 2395,
+          "title": "Опровержения на слёты"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Arizona RP Logs - Настройки</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 16px;
+            background: #121212;
+            color: #f1f1f1;
+            width: 240px;
+        }
+        h1 {
+            margin: 0 0 12px;
+            font-size: 16px;
+            text-align: center;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        label {
+            font-size: 13px;
+        }
+        input[type="number"] {
+            padding: 6px 8px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            background: #1f1f1f;
+            color: #f1f1f1;
+        }
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #4dd0e1;
+            box-shadow: 0 0 0 2px rgba(77, 208, 225, 0.25);
+        }
+        .toggle-btn {
+            padding: 8px;
+            border-radius: 6px;
+            border: none;
+            background: #198754;
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s ease, transform 0.2s ease;
+        }
+        .toggle-btn:hover {
+            background: #157347;
+        }
+        .toggle-btn--off {
+            background: #dc3545;
+        }
+        .toggle-btn--off:hover {
+            background: #bb2d3b;
+        }
+        .toggle-btn--inactive {
+            background: #3d3d3d;
+            color: #e0e0e0;
+        }
+        .toggle-btn--inactive:hover {
+            background: #4b4b4b;
+        }
+        button {
+            padding: 8px;
+            border: none;
+            border-radius: 4px;
+            background: #4dd0e1;
+            color: #000;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #3abbd1;
+        }
+        #status {
+            min-height: 18px;
+            font-size: 12px;
+            color: #9be7ff;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Настройки</h1>
+    <form id="settingsForm">
+        <label for="maxMonths">Макс. период (мес.) для подгрузки:</label>
+        <input id="maxMonths" type="number" min="1" max="60" step="1" required>
+        <hr>
+        <button type="button" id="autoSplitToggleBtn" class="toggle-btn">Автоделение логов ВКЛ</button>
+        <button type="button" id="csvButtonToggleBtn" class="toggle-btn">Кнопка Скачать CSV ВКЛ</button>
+        <button type="button" id="suspiciousButtonToggleBtn" class="toggle-btn toggle-btn--off">Кнопка Поиск подозрительных сделок ВЫКЛ</button>
+        <button type="button" id="multiUrlToggleBtn" class="toggle-btn toggle-btn--off">Кнопка Multi-URL ВЫКЛ</button>
+        <button type="submit">Сохранить</button>
+        <hr>
+        <div id="priceStatsContainer">
+            <label>Переопределений цен:</label>
+            <div id="priceStats" style="font-size: 12px; color: #9be7ff; margin-bottom: 8px; min-height: 18px;"></div>
+            <button type="button" id="exportPricesBtn" class="toggle-btn" style="background: #4dd0e1; color: #000; width: 100%; margin: 4px 0;">Скачать custom_prices.json</button>
+            <button type="button" id="resetAllPricesBtn" class="toggle-btn toggle-btn--alert" style="width: 100%; margin: 4px 0;">Сбросить все цены</button>
+        </div>
+        <hr>
+        <div id="objectsDownloadContainer">
+            <label>PriceParser: список предметов</label>
+            <button type="button" id="downloadObjectsBtn" class="toggle-btn" style="background: #4dd0e1; color: #000; width: 100%; margin: 4px 0;">Скачать object_names.json</button>
+            <div style="font-size: 11px; color: #9be7ff; line-height: 1.3; min-height: 18px;">
+                В окне сохранения выбери путь: <b>moonloader/priceparser_cache/object_names.json</b>
+            </div>
+        </div>
+        <div id="status"></div>
+    </form>
+    <script src="popup.js"></script>
+</body>
+</html>
