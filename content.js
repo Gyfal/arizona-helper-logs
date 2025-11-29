@@ -1437,6 +1437,98 @@ function getVisibleText(node) {
         }
     }
 
+    async function loadCustomPriceFile() {
+        try {
+            const customUrl = chrome.runtime.getURL('custom_prices.json');
+            const response = await fetch(customUrl);
+            if (!response.ok) {
+                // Тихо выходим, если файл не существует
+                if (response.status !== 404) {
+                    pricesLog('Не удалось загрузить custom_prices.json:', response.status);
+                }
+                return;
+            }
+
+            const text = (await response.text()).trim();
+            let applied = 0;
+
+            const tryAddItem = (id, price) => {
+                const normalized = normalizePriceValue(price);
+                if (id && normalized) {
+                    itemPricesMap.set(String(id), normalized);
+                    applied += 1;
+                }
+            };
+
+            let parsedJson = null;
+            try {
+                parsedJson = JSON.parse(text);
+            } catch (e) {
+                parsedJson = null;
+            }
+
+            if (parsedJson) {
+                if (Array.isArray(parsedJson)) {
+                    for (const item of parsedJson) {
+                        if (item && (item.id || item.name) && item.price !== undefined) {
+                            tryAddItem(item.id || item.name, item.price);
+                        }
+                    }
+                } else if (typeof parsedJson === 'object') {
+                    for (const [key, value] of Object.entries(parsedJson)) {
+                        if (value && typeof value === 'object' && value.price !== undefined) {
+                            tryAddItem(key, value.price);
+                        } else {
+                            tryAddItem(key, value);
+                        }
+                    }
+                }
+            }
+
+            if (applied === 0) {
+                const lines = text.split('\n').filter(line => line.trim());
+                for (const line of lines) {
+                    try {
+                        const item = JSON.parse(line);
+                        if (item && (item.id || item.name) && item.price !== undefined) {
+                            tryAddItem(item.id || item.name, item.price);
+                        }
+                    } catch (e) {
+                        // ignore broken lines
+                    }
+                }
+            }
+
+            if (applied > 0) {
+                pricesLog(`Применены кастомные цены из custom_prices.json: ${applied}`);
+            }
+        } catch (error) {
+            pricesLog('Ошибка при загрузке custom_prices.json:', error);
+        }
+    }
+
+    async function applyPriceOverrides() {
+        try {
+            if (!chrome?.storage?.local?.get) return;
+            const { priceOverrides = null } = await chrome.storage.local.get('priceOverrides');
+            if (!priceOverrides || typeof priceOverrides !== 'object') return;
+
+            let applied = 0;
+            Object.entries(priceOverrides).forEach(([itemId, rawValue]) => {
+                const normalized = normalizePriceValue(rawValue);
+                if (!normalized) return;
+                itemPricesMap.set(String(itemId), normalized);
+                applied += 1;
+            });
+
+            if (applied > 0) {
+                pricesLog(`Применены кастомные цены: ${applied}`);
+            }
+        } catch (error) {
+            pricesLog('Не удалось применить кастомные цены:', error);
+        }
+    }
+
     async function loadVehiclePriceFile() {
         try {
             const vehiclesUrl = chrome.runtime.getURL('vehicle_prices.jsonl');
@@ -1518,6 +1610,8 @@ function getVisibleText(node) {
         try {
             await loadCurrencyRates();
             await loadItemPriceFile();
+            await loadCustomPriceFile();
+            await applyPriceOverrides();
             await loadVehiclePriceFile();
 
             processItemPrices();
@@ -2106,6 +2200,860 @@ function getVisibleText(node) {
     }
 
     // ============================================
+    // ОБЪЕДИНЕНИЕ ПРОИЗВОЛЬНЫХ URL (MULTI-URL MERGER)
+    // ============================================
+
+    const MULTI_URL_STORAGE_KEY = 'logsparser_multi_url_configs'; // Изменено на множественное число
+    const MULTI_URL_PANEL_ID = 'multiUrlMergerPanel';
+
+    const multiUrlState = {
+        enabled: false,
+        additionalUrls: [], // Массив дополнительных URL для объединения
+        baseUrl: null
+    };
+
+    // Нормализация URL для надежного сравнения (удаляет page и сортирует параметры)
+    function normalizeUrlForComparison(urlString) {
+        try {
+            const url = new URL(urlString, window.location.href);
+            const params = new URLSearchParams(url.search);
+
+            // Удаляем параметр page, так как он динамический
+            params.delete('page');
+
+            // Сортируем параметры для стабильного сравнения
+            const sortedParams = new URLSearchParams(
+                Array.from(params.entries()).sort((a, b) => {
+                    if (a[0] === b[0]) {
+                        return a[1].localeCompare(b[1]);
+                    }
+                    return a[0].localeCompare(b[0]);
+                })
+            );
+
+            // Возвращаем путь + отсортированные параметры
+            return url.origin + url.pathname + '?' + sortedParams.toString();
+        } catch (error) {
+            console.warn(DEBUG_PREFIX, 'Не удалось нормализовать URL', urlString, error);
+            return urlString;
+        }
+    }
+
+    // Получение нормализованного URL текущей страницы
+    function getCurrentNormalizedUrl() {
+        return normalizeUrlForComparison(window.location.href);
+    }
+
+    // Загрузка сохраненной конфигурации из localStorage для текущей страницы
+    function loadMultiUrlConfig() {
+        try {
+            const saved = localStorage.getItem(MULTI_URL_STORAGE_KEY);
+            if (saved) {
+                const allConfigs = JSON.parse(saved); // Это объект { [normalizedUrl]: { enabled, additionalUrls } }
+                const currentUrl = getCurrentNormalizedUrl();
+                const config = allConfigs[currentUrl];
+
+                if (config && Array.isArray(config.additionalUrls)) {
+                    multiUrlState.enabled = config.enabled || false;
+                    multiUrlState.additionalUrls = config.additionalUrls.filter(url => url && url.trim());
+                    multiUrlState.baseUrl = currentUrl;
+                    console.log(DEBUG_PREFIX, 'Загружена конфигурация Multi-URL для', currentUrl, ':', multiUrlState);
+                } else {
+                    // Для этой страницы нет конфигурации
+                    multiUrlState.enabled = false;
+                    multiUrlState.additionalUrls = [];
+                    multiUrlState.baseUrl = currentUrl;
+                    console.log(DEBUG_PREFIX, 'Конфигурация Multi-URL для текущей страницы не найдена');
+                }
+            } else {
+                multiUrlState.enabled = false;
+                multiUrlState.additionalUrls = [];
+                multiUrlState.baseUrl = getCurrentNormalizedUrl();
+            }
+        } catch (error) {
+            console.warn(DEBUG_PREFIX, 'Не удалось загрузить конфигурацию Multi-URL', error);
+            multiUrlState.enabled = false;
+            multiUrlState.additionalUrls = [];
+            multiUrlState.baseUrl = getCurrentNormalizedUrl();
+        }
+    }
+
+    // Сохранение конфигурации в localStorage для текущей страницы
+    function saveMultiUrlConfig() {
+        try {
+            // Загружаем все существующие конфигурации
+            const saved = localStorage.getItem(MULTI_URL_STORAGE_KEY);
+            const allConfigs = saved ? JSON.parse(saved) : {};
+
+            const currentUrl = getCurrentNormalizedUrl();
+
+            // Обновляем конфигурацию для текущей страницы
+            if (multiUrlState.enabled && multiUrlState.additionalUrls.length > 0) {
+                allConfigs[currentUrl] = {
+                    enabled: multiUrlState.enabled,
+                    additionalUrls: multiUrlState.additionalUrls
+                };
+            } else {
+                // Если отключено или нет URL - удаляем конфигурацию для этой страницы
+                delete allConfigs[currentUrl];
+            }
+
+            // Сохраняем все конфигурации
+            localStorage.setItem(MULTI_URL_STORAGE_KEY, JSON.stringify(allConfigs));
+            console.log(DEBUG_PREFIX, 'Сохранена конфигурация Multi-URL для', currentUrl, ':', multiUrlState);
+        } catch (error) {
+            console.warn(DEBUG_PREFIX, 'Не удалось сохранить конфигурацию Multi-URL', error);
+        }
+    }
+
+    // Проверка, активна ли функция объединения нескольких URL для текущей страницы
+    function isMultiUrlCombinedActive() {
+        return multiUrlState.enabled &&
+               multiUrlState.additionalUrls.length > 0 &&
+               multiUrlState.baseUrl === getCurrentNormalizedUrl();
+    }
+
+    // Загрузка страницы по URL
+    async function fetchPageRows(url) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+        try {
+            const response = await fetch(url, {
+                credentials: 'include',
+                signal: controller.signal
+            });
+
+            if (!response.ok) {
+                throw new Error(`Статус ответа: ${response.status}`);
+            }
+
+            const htmlText = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlText, 'text/html');
+
+            const rowNodes = Array.from(doc.querySelectorAll('table.table-hover tbody tr'));
+            const importedRows = rowNodes.map(row => document.importNode(row, true));
+            const paginationMeta = extractPaginationMeta(doc, null, null);
+
+            return {
+                rows: importedRows,
+                rowCount: importedRows.length,
+                paginationMeta
+            };
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    // Обновление номера страницы в URL
+    function updateUrlPageNumber(urlString, pageNumber) {
+        try {
+            const parsed = new URL(urlString, window.location.href);
+            if (Number.isFinite(pageNumber) && pageNumber > 0) {
+                parsed.searchParams.set('page', String(pageNumber));
+            } else {
+                parsed.searchParams.delete('page');
+            }
+            return parsed.toString();
+        } catch (error) {
+            console.warn(DEBUG_PREFIX, 'Не удалось обновить номер страницы в URL', error);
+            return urlString;
+        }
+    }
+
+    // Основная функция объединения данных из нескольких URL
+    async function downloadMultiUrlMergedPage(baseUrl) {
+        const pageNumber = getPageNumberFromUrl(baseUrl) ?? 1;
+
+        // Создаем массив промисов для загрузки базового URL и всех дополнительных
+        const urlsToFetch = [baseUrl, ...multiUrlState.additionalUrls.map(url => updateUrlPageNumber(url, pageNumber))];
+
+        console.log(DEBUG_PREFIX, `Загрузка страницы ${pageNumber} из ${urlsToFetch.length} источников`);
+
+        const results = await Promise.all(urlsToFetch.map(url => fetchPageRows(url)));
+
+        // Объединяем все строки
+        const combinedRows = [];
+        results.forEach(result => {
+            if (result.rows && result.rows.length > 0) {
+                combinedRows.push(...result.rows);
+            }
+        });
+
+        // Сортируем по timestamp (первая колонка)
+        sortRowsByTimestampDesc(combinedRows);
+
+        // Создаем фрагмент с объединенными строками
+        const fragment = document.createDocumentFragment();
+        combinedRows.forEach(row => fragment.appendChild(row));
+
+        // Определяем общее количество страниц (берем максимальное)
+        const totalPages = Math.max(
+            ...results.map(r => r.paginationMeta?.totalPages || 0)
+        ) || null;
+
+        const pageLimit = results[0]?.paginationMeta?.pageLimit || null;
+
+        // URL для следующей страницы
+        const nextUrl = totalPages && pageNumber < totalPages
+            ? updateUrlPageNumber(baseUrl, pageNumber + 1)
+            : null;
+
+        return {
+            fragment,
+            rowCount: combinedRows.length,
+            nextUrl,
+            totalPages,
+            currentPage: pageNumber,
+            pageLimit
+        };
+    }
+
+    // Диалог для управления всеми конфигурациями
+    function showAllConfigsDialog() {
+        const existing = document.getElementById('multiUrlAllConfigsDialog');
+        if (existing) {
+            existing.remove();
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.id = 'multiUrlAllConfigsDialog';
+        overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10001;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+        `;
+
+        const dialog = document.createElement('div');
+        dialog.style.cssText = `
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            border: 2px solid #4a90e2;
+            border-radius: 12px;
+            padding: 20px;
+            max-width: 700px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            color: #fff;
+        `;
+
+        const header = document.createElement('div');
+        header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+        `;
+
+        const title = document.createElement('h3');
+        title.textContent = '📋 Все сохраненные конфигурации';
+        title.style.cssText = 'margin: 0; font-size: 18px; font-weight: 600;';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText = `
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: #fff;
+            font-size: 24px;
+            cursor: pointer;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        `;
+        closeBtn.onmouseover = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.2)';
+        closeBtn.onmouseout = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+        closeBtn.onclick = () => overlay.remove();
+
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        dialog.appendChild(header);
+
+        // Загружаем все конфигурации
+        const saved = localStorage.getItem(MULTI_URL_STORAGE_KEY);
+        const allConfigs = saved ? JSON.parse(saved) : {};
+        const configEntries = Object.entries(allConfigs);
+
+        if (configEntries.length === 0) {
+            const emptyMsg = document.createElement('div');
+            emptyMsg.style.cssText = `
+                text-align: center;
+                padding: 40px 20px;
+                opacity: 0.7;
+                font-size: 14px;
+            `;
+            emptyMsg.textContent = 'Нет сохраненных конфигураций';
+            dialog.appendChild(emptyMsg);
+        } else {
+            const list = document.createElement('div');
+            list.style.cssText = 'display: flex; flex-direction: column; gap: 10px;';
+
+            configEntries.forEach(([normalizedUrl, config]) => {
+                const item = document.createElement('div');
+                item.style.cssText = `
+                    background: rgba(255, 255, 255, 0.1);
+                    border-radius: 8px;
+                    padding: 12px;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                `;
+
+                const urlDisplay = document.createElement('div');
+                urlDisplay.style.cssText = `
+                    font-size: 11px;
+                    word-break: break-all;
+                    margin-bottom: 8px;
+                    padding: 8px;
+                    background: rgba(0, 0, 0, 0.2);
+                    border-radius: 4px;
+                    font-family: monospace;
+                `;
+                urlDisplay.textContent = normalizedUrl;
+
+                const info = document.createElement('div');
+                info.style.cssText = 'font-size: 12px; margin-bottom: 8px; opacity: 0.9;';
+                info.innerHTML = `
+                    <strong>Дополнительных URL:</strong> ${config.additionalUrls?.length || 0}<br>
+                    ${config.enabled ? '<span style="color: #34c759;">✓ Активно</span>' : '<span style="opacity: 0.6;">○ Неактивно</span>'}
+                `;
+
+                const actions = document.createElement('div');
+                actions.style.cssText = 'display: flex; gap: 8px; margin-top: 10px;';
+
+                const viewBtn = document.createElement('button');
+                viewBtn.textContent = '👁 Просмотр';
+                viewBtn.style.cssText = `
+                    flex: 1;
+                    padding: 6px;
+                    border: 1px solid rgba(74, 144, 226, 0.5);
+                    background: rgba(74, 144, 226, 0.2);
+                    color: #fff;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-size: 11px;
+                    transition: all 0.2s;
+                `;
+                viewBtn.onmouseover = () => viewBtn.style.background = 'rgba(74, 144, 226, 0.3)';
+                viewBtn.onmouseout = () => viewBtn.style.background = 'rgba(74, 144, 226, 0.2)';
+                viewBtn.onclick = () => {
+                    alert(`Дополнительные URL:\n\n${config.additionalUrls.join('\n\n')}`);
+                };
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.textContent = '🗑 Удалить';
+                deleteBtn.style.cssText = `
+                    flex: 1;
+                    padding: 6px;
+                    border: 1px solid rgba(255, 59, 48, 0.5);
+                    background: rgba(255, 59, 48, 0.2);
+                    color: #fff;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    font-size: 11px;
+                    transition: all 0.2s;
+                `;
+                deleteBtn.onmouseover = () => deleteBtn.style.background = 'rgba(255, 59, 48, 0.3)';
+                deleteBtn.onmouseout = () => deleteBtn.style.background = 'rgba(255, 59, 48, 0.2)';
+                deleteBtn.onclick = () => {
+                    if (confirm('Удалить эту конфигурацию?')) {
+                        delete allConfigs[normalizedUrl];
+                        localStorage.setItem(MULTI_URL_STORAGE_KEY, JSON.stringify(allConfigs));
+                        overlay.remove();
+                        showAllConfigsDialog(); // Перезагружаем диалог
+                    }
+                };
+
+                actions.appendChild(viewBtn);
+                actions.appendChild(deleteBtn);
+
+                item.appendChild(urlDisplay);
+                item.appendChild(info);
+                item.appendChild(actions);
+                list.appendChild(item);
+            });
+
+            dialog.appendChild(list);
+
+            // Кнопка очистки всех конфигураций
+            if (configEntries.length > 0) {
+                const clearAllBtn = document.createElement('button');
+                clearAllBtn.textContent = '🗑 Удалить все конфигурации';
+                clearAllBtn.style.cssText = `
+                    width: 100%;
+                    padding: 10px;
+                    margin-top: 15px;
+                    border: 1px solid rgba(255, 59, 48, 0.5);
+                    background: rgba(255, 59, 48, 0.2);
+                    color: #fff;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-size: 13px;
+                    font-weight: 500;
+                    transition: all 0.2s;
+                `;
+                clearAllBtn.onmouseover = () => clearAllBtn.style.background = 'rgba(255, 59, 48, 0.3)';
+                clearAllBtn.onmouseout = () => clearAllBtn.style.background = 'rgba(255, 59, 48, 0.2)';
+                clearAllBtn.onclick = () => {
+                    if (confirm(`Удалить все ${configEntries.length} конфигураций?`)) {
+                        localStorage.removeItem(MULTI_URL_STORAGE_KEY);
+                        overlay.remove();
+                        alert('Все конфигурации удалены. Перезагрузите страницу для применения изменений.');
+                    }
+                };
+                dialog.appendChild(clearAllBtn);
+            }
+        }
+
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        // Закрытие по клику на overlay
+        overlay.onclick = (e) => {
+            if (e.target === overlay) {
+                overlay.remove();
+            }
+        };
+    }
+
+    // Создание UI панели для управления Multi-URL
+    function createMultiUrlPanel() {
+        // Проверяем, не создана ли уже панель
+        if (document.getElementById(MULTI_URL_PANEL_ID)) {
+            return;
+        }
+
+        const panel = document.createElement('div');
+        panel.id = MULTI_URL_PANEL_ID;
+        panel.style.cssText = `
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            border: 2px solid #4a90e2;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            z-index: 10000;
+            min-width: 400px;
+            max-width: 600px;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        `;
+
+        const header = document.createElement('div');
+        header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+        `;
+
+        const title = document.createElement('h3');
+        title.textContent = '🔗 Объединение логов';
+        title.style.cssText = 'margin: 0; font-size: 18px; font-weight: 600;';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText = `
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: #fff;
+            font-size: 24px;
+            cursor: pointer;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        `;
+        closeBtn.onmouseover = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.2)';
+        closeBtn.onmouseout = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+        closeBtn.onclick = () => panel.remove();
+
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        panel.appendChild(header);
+
+        // Информация
+        const info = document.createElement('div');
+        info.style.cssText = `
+            margin-bottom: 15px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+        `;
+        info.innerHTML = `
+            <strong>💡 Конфигурация привязана к текущей странице</strong><br>
+            <span style="font-size: 11px; opacity: 0.8; margin-top: 5px; display: block;">
+                Каждая страница с уникальными параметрами имеет свою отдельную конфигурацию объединения.
+            </span>
+        `;
+        panel.appendChild(info);
+
+        // Контейнер для полей ввода URL
+        const urlsContainer = document.createElement('div');
+        urlsContainer.id = 'multiUrlInputsContainer';
+        panel.appendChild(urlsContainer);
+
+        // Функция для создания поля ввода URL
+        function createUrlInput(index, value = '') {
+            const inputGroup = document.createElement('div');
+            inputGroup.style.cssText = `
+                margin-bottom: 12px;
+                display: flex;
+                gap: 8px;
+            `;
+
+            const label = document.createElement('label');
+            label.textContent = `URL ${index + 1}:`;
+            label.style.cssText = `
+                min-width: 60px;
+                display: flex;
+                align-items: center;
+                font-weight: 500;
+                font-size: 13px;
+            `;
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.placeholder = 'https://arizonarp.logsparser.info/?...';
+            input.value = value;
+            input.style.cssText = `
+                flex: 1;
+                padding: 8px 12px;
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.1);
+                color: #fff;
+                font-size: 12px;
+                transition: all 0.2s;
+            `;
+            input.onfocus = () => {
+                input.style.background = 'rgba(255, 255, 255, 0.15)';
+                input.style.borderColor = '#4a90e2';
+            };
+            input.onblur = () => {
+                input.style.background = 'rgba(255, 255, 255, 0.1)';
+                input.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+            };
+
+            const removeBtn = document.createElement('button');
+            removeBtn.textContent = '−';
+            removeBtn.style.cssText = `
+                width: 32px;
+                height: 32px;
+                border: none;
+                background: rgba(255, 59, 48, 0.8);
+                color: #fff;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 20px;
+                transition: all 0.2s;
+            `;
+            removeBtn.onmouseover = () => removeBtn.style.background = 'rgba(255, 59, 48, 1)';
+            removeBtn.onmouseout = () => removeBtn.style.background = 'rgba(255, 59, 48, 0.8)';
+            removeBtn.onclick = () => {
+                inputGroup.remove();
+                updateUrlLabels();
+            };
+
+            inputGroup.appendChild(label);
+            inputGroup.appendChild(input);
+            inputGroup.appendChild(removeBtn);
+
+            return inputGroup;
+        }
+
+        // Обновление номеров URL после удаления
+        function updateUrlLabels() {
+            const inputs = urlsContainer.querySelectorAll('label');
+            inputs.forEach((label, index) => {
+                label.textContent = `URL ${index + 1}:`;
+            });
+        }
+
+        // Добавляем начальные поля (или загруженные из конфигурации)
+        if (multiUrlState.additionalUrls.length > 0) {
+            multiUrlState.additionalUrls.forEach((url, index) => {
+                urlsContainer.appendChild(createUrlInput(index, url));
+            });
+        } else {
+            // Добавляем 2 пустых поля по умолчанию
+            for (let i = 0; i < 2; i++) {
+                urlsContainer.appendChild(createUrlInput(i));
+            }
+        }
+
+        // Кнопка добавления нового URL
+        const addUrlBtn = document.createElement('button');
+        addUrlBtn.textContent = '+ Добавить URL';
+        addUrlBtn.style.cssText = `
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 2px dashed rgba(255, 255, 255, 0.3);
+            background: transparent;
+            color: #fff;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        `;
+        addUrlBtn.onmouseover = () => {
+            addUrlBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+            addUrlBtn.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+        };
+        addUrlBtn.onmouseout = () => {
+            addUrlBtn.style.background = 'transparent';
+            addUrlBtn.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+        };
+        addUrlBtn.onclick = () => {
+            const currentCount = urlsContainer.querySelectorAll('div').length;
+            if (currentCount < 5) { // Максимум 5 дополнительных URL
+                urlsContainer.appendChild(createUrlInput(currentCount));
+            } else {
+                alert('Максимум 5 дополнительных URL');
+            }
+        };
+        panel.appendChild(addUrlBtn);
+
+        // Кнопки действий
+        const actions = document.createElement('div');
+        actions.style.cssText = `
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        `;
+
+        const applyBtn = document.createElement('button');
+        applyBtn.textContent = '✓ Применить и обновить';
+        applyBtn.style.cssText = `
+            flex: 1;
+            padding: 12px;
+            border: none;
+            background: linear-gradient(135deg, #34c759 0%, #30d158 100%);
+            color: #fff;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(52, 199, 89, 0.3);
+        `;
+        applyBtn.onmouseover = () => {
+            applyBtn.style.transform = 'translateY(-2px)';
+            applyBtn.style.boxShadow = '0 6px 16px rgba(52, 199, 89, 0.4)';
+        };
+        applyBtn.onmouseout = () => {
+            applyBtn.style.transform = 'translateY(0)';
+            applyBtn.style.boxShadow = '0 4px 12px rgba(52, 199, 89, 0.3)';
+        };
+        applyBtn.onclick = () => {
+            const inputs = urlsContainer.querySelectorAll('input');
+            const urls = Array.from(inputs)
+                .map(input => input.value.trim())
+                .filter(url => url.length > 0);
+
+            if (urls.length === 0) {
+                alert('Добавьте хотя бы один URL для объединения');
+                return;
+            }
+
+            multiUrlState.enabled = true;
+            multiUrlState.additionalUrls = urls;
+            multiUrlState.baseUrl = getCurrentNormalizedUrl();
+            saveMultiUrlConfig();
+
+            console.log(DEBUG_PREFIX, 'Конфигурация Multi-URL применена для текущей страницы, перезагрузка...');
+            window.location.reload();
+        };
+
+        const disableBtn = document.createElement('button');
+        disableBtn.textContent = '✕ Отключить';
+        disableBtn.style.cssText = `
+            padding: 12px 20px;
+            border: none;
+            background: rgba(255, 59, 48, 0.8);
+            color: #fff;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s;
+        `;
+        disableBtn.onmouseover = () => disableBtn.style.background = 'rgba(255, 59, 48, 1)';
+        disableBtn.onmouseout = () => disableBtn.style.background = 'rgba(255, 59, 48, 0.8)';
+        disableBtn.onclick = () => {
+            multiUrlState.enabled = false;
+            multiUrlState.additionalUrls = [];
+            multiUrlState.baseUrl = getCurrentNormalizedUrl();
+            saveMultiUrlConfig();
+            console.log(DEBUG_PREFIX, 'Multi-URL отключен для текущей страницы, перезагрузка...');
+            window.location.reload();
+        };
+
+        actions.appendChild(applyBtn);
+        actions.appendChild(disableBtn);
+        panel.appendChild(actions);
+
+        // Кнопка управления всеми конфигурациями
+        const manageBtn = document.createElement('button');
+        manageBtn.textContent = '📋 Управление конфигурациями';
+        manageBtn.style.cssText = `
+            width: 100%;
+            padding: 8px;
+            margin-top: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            background: transparent;
+            color: #fff;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        `;
+        manageBtn.onmouseover = () => {
+            manageBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+        };
+        manageBtn.onmouseout = () => {
+            manageBtn.style.background = 'transparent';
+        };
+        manageBtn.onclick = () => {
+            showAllConfigsDialog();
+        };
+        panel.appendChild(manageBtn);
+
+        // Статус
+        const status = document.createElement('div');
+        status.style.cssText = `
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 500;
+        `;
+
+        if (multiUrlState.enabled && multiUrlState.additionalUrls.length > 0) {
+            status.style.background = 'rgba(52, 199, 89, 0.2)';
+            status.style.border = '1px solid rgba(52, 199, 89, 0.5)';
+            status.innerHTML = `✓ Режим объединения активен для этой страницы<br><span style="font-size: 11px; opacity: 0.9;">(${multiUrlState.additionalUrls.length} дополнительных URL)</span>`;
+        } else {
+            status.style.background = 'rgba(255, 255, 255, 0.05)';
+            status.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+            status.innerHTML = `ℹ️ Режим объединения не активен для этой страницы`;
+        }
+        panel.appendChild(status);
+
+        document.body.appendChild(panel);
+    }
+
+    // Создание кнопки для открытия панели Multi-URL
+    function createMultiUrlToggleButton() {
+        if (document.getElementById('multiUrlToggleBtn')) {
+            return;
+        }
+
+        const button = document.createElement('button');
+        button.id = 'multiUrlToggleBtn';
+        button.textContent = '🔗';
+        button.title = 'Объединение логов из нескольких источников';
+        button.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 48px;
+            height: 48px;
+            border: none;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 24px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 9999;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        if (multiUrlState.enabled) {
+            button.style.background = 'linear-gradient(135deg, #34c759 0%, #30d158 100%)';
+            button.style.animation = 'pulse 2s infinite';
+        }
+
+        button.onmouseover = () => {
+            button.style.transform = 'scale(1.1)';
+            button.style.boxShadow = '0 6px 20px rgba(0, 0, 0, 0.4)';
+        };
+        button.onmouseout = () => {
+            button.style.transform = 'scale(1)';
+            button.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.3)';
+        };
+
+        button.onclick = () => {
+            const existing = document.getElementById(MULTI_URL_PANEL_ID);
+            if (existing) {
+                existing.remove();
+            } else {
+                createMultiUrlPanel();
+            }
+        };
+
+        document.body.appendChild(button);
+
+        // Добавляем анимацию pulse в стили
+        if (!document.getElementById('multiUrlStyles')) {
+            const style = document.createElement('style');
+            style.id = 'multiUrlStyles';
+            style.textContent = `
+                @keyframes pulse {
+                    0%, 100% { box-shadow: 0 4px 12px rgba(52, 199, 89, 0.3); }
+                    50% { box-shadow: 0 4px 20px rgba(52, 199, 89, 0.6); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+
+    // Инициализация Multi-URL функционала
+    function initMultiUrl() {
+        loadMultiUrlConfig();
+
+        // Создаем кнопку для управления
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', createMultiUrlToggleButton);
+        } else {
+            createMultiUrlToggleButton();
+        }
+
+        console.log(DEBUG_PREFIX, 'Multi-URL инициализирован', multiUrlState);
+    }
+
+    // Запускаем инициализацию
+    initMultiUrl();
+
+    // ============================================
     // БЕСКОНЕЧНАЯ ПРОКРУТКА ЛОГОВ
     // ============================================
 
@@ -2524,6 +3472,11 @@ function getVisibleText(node) {
     }
 
     async function downloadLogsPage(url) {
+        // Проверяем Multi-URL режим (приоритет выше чем House Combined)
+        if (isMultiUrlCombinedActive()) {
+            return downloadMultiUrlMergedPage(url);
+        }
+
         if (isHouseCombinedUrl(url)) {
             return downloadHouseMergedPage(url);
         }
@@ -2662,6 +3615,20 @@ function getVisibleText(node) {
         }
     }
 
+    async function hydrateMultiUrlFirstPage(tableBody) {
+        try {
+            const merged = await downloadMultiUrlMergedPage(window.location.href);
+            if (merged?.fragment) {
+                tableBody.innerHTML = '';
+                tableBody.appendChild(merged.fragment);
+            }
+            return merged;
+        } catch (error) {
+            console.warn(DEBUG_PREFIX, 'Не удалось объединить Multi-URL логи', error);
+            return null;
+        }
+    }
+
     async function setupInfiniteScroll() {
         if (infiniteScrollState.sentinel) {
             return;
@@ -2672,15 +3639,19 @@ function getVisibleText(node) {
             return;
         }
 
+        const isMultiUrlActive = isMultiUrlCombinedActive();
         const isHouseCombined = isHouseCombinedUrl(window.location.href);
         let mergedMeta = null;
 
-        if (isHouseCombined) {
+        // Multi-URL режим имеет приоритет
+        if (isMultiUrlActive) {
+            mergedMeta = await hydrateMultiUrlFirstPage(tableBody);
+        } else if (isHouseCombined) {
             mergedMeta = await hydrateHouseFirstPage(tableBody);
         }
 
         const pagination = document.querySelector('ul.pagination');
-        if (!pagination && !isHouseCombined) {
+        if (!pagination && !isHouseCombined && !isMultiUrlActive) {
             return;
         }
 
@@ -2700,7 +3671,7 @@ function getVisibleText(node) {
             }
         }
 
-        if (isHouseCombined && mergedMeta) {
+        if ((isMultiUrlActive || isHouseCombined) && mergedMeta) {
             infiniteScrollState.nextPageUrl = mergedMeta.nextUrl;
             if (Number.isFinite(mergedMeta.totalPages) && mergedMeta.totalPages > 0) {
                 infiniteScrollState.totalPages = mergedMeta.totalPages;

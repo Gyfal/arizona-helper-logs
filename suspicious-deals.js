@@ -314,6 +314,17 @@
         return match ? match[1] : '';
     }
 
+    function isSamePlayer(player1, player2) {
+        if (!player1 || !player2) return false;
+        if (player1.accountId && player2.accountId) {
+            return player1.accountId === player2.accountId;
+        }
+        if (player1.player && player2.player) {
+            return player1.player === player2.player;
+        }
+        return false;
+    }
+
     function parseMoneyValue(raw) {
         if (!raw) return null;
         const num = Number(raw.replace(/[^\d]/g, ''));
@@ -414,8 +425,8 @@
         if (cells.length < 2) return null;
         const actionText = normalizeWhitespace(getVisibleText(cells[1])) || '';
         const lower = actionText.toLowerCase();
-        if (!lower.includes('складского помещения') && !lower.includes('склад №')) return null;
-        const warehouseMatch = actionText.match(/склад(?:ского помещения)?\s*№\s*(\d+)/i);
+        if (!lower.includes('складск') && !lower.includes('склад №')) return null;
+        const warehouseMatch = actionText.match(/склад(?:ского|ское)?\s+(?:помещения|помещение)?\s*№\s*(\d+)/i);
         const warehouseId = warehouseMatch ? warehouseMatch[1] : null;
         if (!warehouseId) return null;
 
@@ -429,8 +440,9 @@
         const itemId = ids[ids.length - 1][1];
 
         const player = extractPrimaryPlayer(row) || 'Неизвестно';
+        const accountIds = extractAccountIds(row, 1);
         const quantity = extractQuantityFromText(actionText);
-        const itemNameMatch = actionText.match(/склад[^\[]+?\s(.+?)\s*\[id:/i);
+        const itemNameMatch = actionText.match(/склад(?:ского|ское)?\s+(?:помещения|помещение)?\s*№\s*\d+\s+(.+?)\s*\[id:/i);
         const itemName = itemNameMatch ? normalizeWhitespace(itemNameMatch[1]) : `ID ${itemId}`;
 
         const timestampStr = normalizeWhitespace(getVisibleText(cells[0]));
@@ -449,6 +461,7 @@
             quantity,
             direction,
             player,
+            accountId: accountIds[0] || null,
             timestamp,
             timestampStr,
             approxValue
@@ -469,18 +482,28 @@
         const actionText = normalizeWhitespace(getVisibleText(cells[1])) || '';
         const lower = actionText.toLowerCase();
         if (!/денежные средства/i.test(lower)) return null;
-        const warehouseMatch = actionText.match(/склад\s*№\s*(\d+)/i);
+        const warehouseMatch = actionText.match(/склад[ауе]?\s*№\s*(\d+)/i);
         const warehouseId = warehouseMatch ? warehouseMatch[1] : null;
         if (!warehouseId) return null;
 
         let direction = null;
-        if (/положил/i.test(actionText)) direction = 'put';
-        if (/берет/i.test(actionText)) direction = 'take';
+        if (/положил|поместил/i.test(actionText)) direction = 'put';
+        if (/берет|взял|забрал/i.test(actionText)) direction = 'take';
         if (!direction) return null;
 
         const amountMatch = actionText.match(/в количестве\s*([\d\s.,]+)\$/i);
         const amount = amountMatch ? parseMoneyValue(amountMatch[1]) : null;
         if (!Number.isFinite(amount) || amount <= 0) return null;
+
+        const commissionMatch = actionText.match(/комисси(?:я|и):\s*([\d\s.,]+)\$/i);
+        const commission = commissionMatch ? parseMoneyValue(commissionMatch[1]) : null;
+        const totalAfterMatch = actionText.match(/Всего на складе:\s*([\d\s.,]+)\$/i);
+        const totalAfter = totalAfterMatch ? parseMoneyValue(totalAfterMatch[1]) : null;
+        const remainderMatch = actionText.match(/Остаток:\s*([\d\s.,]+)\$/i);
+        const remainderAfter = remainderMatch ? parseMoneyValue(remainderMatch[1]) : null;
+        const netAmount = direction === 'put' && Number.isFinite(commission)
+            ? Math.max(0, amount - commission)
+            : amount;
 
         const player = extractPrimaryPlayer(row) || 'Неизвестно';
         const accountIds = extractAccountIds(row, 1);
@@ -491,6 +514,10 @@
             warehouseId,
             direction,
             amount,
+            netAmount,
+            commission: Number.isFinite(commission) ? commission : null,
+            totalAfter: Number.isFinite(totalAfter) ? totalAfter : null,
+            remainderAfter: Number.isFinite(remainderAfter) ? remainderAfter : null,
             player,
             accountId: accountIds[0] || null,
             timestamp: ts,
@@ -583,9 +610,10 @@
 
                 const match = deposits.find(dep =>
                     !dep.consumed &&
-                    dep.player &&
-                    ev.player &&
-                    dep.player !== ev.player &&
+                    !isSamePlayer(
+                        { player: dep.player, accountId: dep.accountId },
+                        { player: ev.player, accountId: ev.accountId }
+                    ) &&
                     dep.amount === ev.amount
                 );
 
@@ -602,10 +630,27 @@
                 }
             });
 
-            if (pairs.length > 0 && players.size > 1) {
+            // Фильтруем пары: убираем те, где получатель вернул деньги обратно
+            const validPairs = pairs.filter(pair => {
+                // Ищем событие, где получатель положил обратно такую же сумму
+                const returnEvent = sorted.find(ev =>
+                    ev.direction === 'in' &&
+                    ev.timestamp > pair.withdraw.timestamp &&
+                    isSamePlayer(
+                        { player: ev.player, accountId: ev.accountId },
+                        { player: pair.withdraw.player, accountId: pair.withdraw.accountId }
+                    ) &&
+                    ev.amount === pair.withdraw.amount
+                );
+
+                // Если получатель вернул деньги обратно, это не перелив
+                return !returnEvent;
+            });
+
+            if (validPairs.length > 0 && players.size > 1) {
                 findings.push({
                     houseId,
-                    pairs,
+                    pairs: validPairs,
                     players: Array.from(players.values()),
                     chronology: sorted
                 });
@@ -643,9 +688,9 @@
             let itemNameSample = '';
 
             sorted.forEach(ev => {
-                const playerKey = ev.player || 'Неизвестно';
+                const playerKey = ev.accountId ? `acc:${ev.accountId}` : `name:${ev.player}`;
                 if (!players.has(playerKey)) {
-                    players.set(playerKey, { name: ev.player });
+                    players.set(playerKey, { name: ev.player, accountId: ev.accountId });
                 }
                 itemNameSample = ev.itemName || itemNameSample;
 
@@ -657,33 +702,55 @@
 
                 const match = deposits.find(dep =>
                     !dep.consumed &&
-                    dep.player &&
-                    ev.player &&
-                    dep.player !== ev.player &&
+                    !isSamePlayer(
+                        { player: dep.player, accountId: dep.accountId },
+                        { player: ev.player, accountId: ev.accountId }
+                    ) &&
                     dep.quantity === ev.quantity
                 );
 
                 if (match) {
                     match.consumed = true;
+                    const pairValue = match.approxValue || ev.approxValue || null;
                     pairs.push({
                         deposit: match,
-                        withdraw: ev
+                        withdraw: ev,
+                        value: pairValue
                     });
                 }
             });
 
-            if (pairs.length > 0 && players.size > 1) {
+            // Фильтруем пары: убираем те, где получатель вернул предмет обратно
+            const validPairs = pairs.filter(pair => {
+                // Ищем событие, где получатель (withdraw) положил обратно такое же количество
+                const returnEvent = sorted.find(ev =>
+                    ev.direction === 'put' &&
+                    ev.timestamp > pair.withdraw.timestamp &&
+                    isSamePlayer(
+                        { player: ev.player, accountId: ev.accountId },
+                        { player: pair.withdraw.player, accountId: pair.withdraw.accountId }
+                    ) &&
+                    ev.quantity === pair.withdraw.quantity
+                );
+
+                // Если получатель вернул предмет обратно, это не перелив
+                return !returnEvent;
+            });
+
+            if (validPairs.length > 0 && players.size > 1) {
+                const totalValue = validPairs.reduce((sum, pair) => sum + (pair.value || 0), 0);
                 findings.push({
                     warehouseId,
                     itemId,
                     itemName: itemNameSample,
-                    pairs,
-                    players: Array.from(players.values())
+                    pairs: validPairs,
+                    players: Array.from(players.values()),
+                    totalValue
                 });
             }
         });
 
-        findings.sort((a, b) => b.pairs.length - a.pairs.length);
+        findings.sort((a, b) => (b.totalValue || 0) - (a.totalValue || 0));
 
         return findings;
     }
@@ -705,6 +772,13 @@
             const deposits = [];
             const pairs = [];
             const players = new Map();
+            const amountClose = (a, b) => {
+                if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+                const diff = Math.abs(a - b);
+                const tolerance = Math.max(10_000, Math.min(a, b) * 0.02);
+                return diff <= tolerance;
+            };
+            const eventValue = (ev) => Number.isFinite(ev?.netAmount) ? ev.netAmount : ev?.amount;
 
             sorted.forEach(ev => {
                 const playerKey = ev.accountId ? `acc:${ev.accountId}` : `name:${ev.player}`;
@@ -717,28 +791,59 @@
                 }
                 if (ev.direction !== 'take') return;
 
-                const match = deposits.find(dep =>
-                    !dep.consumed &&
-                    dep.player &&
-                    ev.player &&
-                    dep.player !== ev.player &&
-                    dep.amount === ev.amount &&
-                    dep.amount >= threshold
-                );
+                const withdrawValue = eventValue(ev);
+                const match = deposits.find(dep => {
+                    const depValue = eventValue(dep);
+                    if (isSamePlayer(
+                        { player: dep.player, accountId: dep.accountId },
+                        { player: ev.player, accountId: ev.accountId }
+                    )) return false;
+                    if (!Number.isFinite(depValue) || !Number.isFinite(withdrawValue)) return false;
+
+                    const byExactAmount = amountClose(depValue, withdrawValue);
+                    const byBalance = Number.isFinite(ev.remainderAfter)
+                        ? amountClose(depValue, withdrawValue + ev.remainderAfter)
+                        : false;
+                    const meetsThreshold = Math.max(depValue, withdrawValue) >= threshold;
+
+                    return !dep.consumed && meetsThreshold && (byExactAmount || byBalance);
+                });
 
                 if (match) {
                     match.consumed = true;
                     pairs.push({
                         deposit: match,
-                        withdraw: ev
+                        withdraw: ev,
+                        amount: Math.round((eventValue(match) + withdrawValue) / 2),
+                        matchedByBalance: Number.isFinite(ev.remainderAfter)
+                            ? amountClose(eventValue(match), withdrawValue + ev.remainderAfter)
+                            : false
                     });
                 }
             });
 
-            if (pairs.length > 0 && players.size > 1) {
+            // Фильтруем пары: убираем те, где получатель вернул деньги обратно
+            const validPairs = pairs.filter(pair => {
+                const withdrawValue = eventValue(pair.withdraw);
+                // Ищем событие, где получатель положил обратно примерно такую же сумму
+                const returnEvent = sorted.find(ev =>
+                    ev.direction === 'put' &&
+                    ev.timestamp > pair.withdraw.timestamp &&
+                    isSamePlayer(
+                        { player: ev.player, accountId: ev.accountId },
+                        { player: pair.withdraw.player, accountId: pair.withdraw.accountId }
+                    ) &&
+                    amountClose(eventValue(ev), withdrawValue)
+                );
+
+                // Если получатель вернул деньги обратно, это не перелив
+                return !returnEvent;
+            });
+
+            if (validPairs.length > 0 && players.size > 1) {
                 findings.push({
                     warehouseId,
-                    pairs,
+                    pairs: validPairs,
                     players: Array.from(players.values()),
                     threshold
                 });
@@ -973,11 +1078,16 @@
 
         const summary = document.getElementById('suspiciousSummary');
         if (summary) {
+            const warehouseItemsTotal = result.warehouseItems.findings.reduce((sum, f) => sum + (f.totalValue || 0), 0);
+            const warehouseItemsStr = warehouseItemsTotal > 0
+                ? ` (~${formatPrice(warehouseItemsTotal)}$)`
+                : '';
+
             summary.textContent = [
                 `Багажник: ${result.trunk.stats.totalEvents} событий (с ценами: ${result.trunk.stats.pricedEvents}), найдено ${result.trunk.findings.length}`,
                 `Почты: ${result.mail.stats.totalEvents} событий, найдено ${result.mail.findings.length}`,
                 `Дома (порог ${formatPrice(options.house.threshold)}$): ${result.house.stats.totalEvents} событий, найдено ${result.house.findings.length}`,
-                `Склад предметы: ${result.warehouseItems.stats.totalEvents} событий, найдено ${result.warehouseItems.findings.length}`,
+                `Склад предметы: ${result.warehouseItems.stats.totalEvents} событий, найдено ${result.warehouseItems.findings.length}${warehouseItemsStr}`,
                 `Склад деньги (порог ${formatPrice(options.warehouse.moneyThreshold)}$): ${result.warehouseMoney.stats.totalEvents} событий, найдено ${result.warehouseMoney.findings.length}`
             ].join('. ');
         }
@@ -1090,29 +1200,35 @@
                 return;
             }
 
-            result.warehouseItems.findings.forEach(find => {
-                const card = document.createElement('div');
-                card.className = 'suspicious-card';
+            result.warehouseItems.findings
+                .sort((a, b) => (b.totalValue || 0) - (a.totalValue || 0))
+                .forEach(find => {
+                    const card = document.createElement('div');
+                    card.className = 'suspicious-card';
 
-                const title = document.createElement('div');
-                title.className = 'suspicious-card__title';
-                title.textContent = `Склад №${find.warehouseId} • ${find.itemName || `ID ${find.itemId}`}`;
+                    const title = document.createElement('div');
+                    title.className = 'suspicious-card__title';
+                    const valueStr = find.totalValue ? ` • ~${formatPrice(find.totalValue)}$` : '';
+                    title.textContent = `Склад №${find.warehouseId} • ${find.itemName || `ID ${find.itemId}`}${valueStr}`;
 
-                const playersList = document.createElement('div');
-                playersList.className = 'suspicious-card__value';
-                playersList.textContent = `Игроки: ${find.players.map(p => p.name || 'Неизвестно').join(' • ')}`;
+                    const playersList = document.createElement('div');
+                    playersList.className = 'suspicious-card__value';
+                    playersList.textContent = `Игроки: ${find.players.map(p => p.accountId ? `${p.name || 'Неизвестно'} (acc ${p.accountId})` : (p.name || 'Неизвестно')).join(' • ')} • Пар: ${find.pairs.length}`;
 
-                const pairsList = document.createElement('ul');
-                pairsList.className = 'suspicious-card__sources';
-                find.pairs.forEach(pair => {
-                    const li = document.createElement('li');
-                    li.textContent = `${pair.deposit.player} положил ×${pair.deposit.quantity} → ${pair.withdraw.player} взял ×${pair.withdraw.quantity} (${pair.deposit.timestampStr} → ${pair.withdraw.timestampStr})`;
-                    pairsList.appendChild(li);
+                    const pairsList = document.createElement('ul');
+                    pairsList.className = 'suspicious-card__sources';
+                    find.pairs.forEach(pair => {
+                        const li = document.createElement('li');
+                        const priceStr = pair.value ? ` • ~${formatPrice(pair.value)}$` : '';
+                        const fromPlayer = pair.deposit.accountId ? `${pair.deposit.player} (acc ${pair.deposit.accountId})` : pair.deposit.player;
+                        const toPlayer = pair.withdraw.accountId ? `${pair.withdraw.player} (acc ${pair.withdraw.accountId})` : pair.withdraw.player;
+                        li.textContent = `${fromPlayer} → ${toPlayer}: ×${pair.withdraw.quantity}${priceStr} (${pair.deposit.timestampStr} → ${pair.withdraw.timestampStr})`;
+                        pairsList.appendChild(li);
+                    });
+
+                    card.append(title, playersList, pairsList);
+                    list.appendChild(card);
                 });
-
-                card.append(title, playersList, pairsList);
-                list.appendChild(card);
-            });
         };
 
         const renderWarehouseMoney = () => {
@@ -1141,7 +1257,9 @@
                 pairsList.className = 'suspicious-card__sources';
                 find.pairs.forEach(pair => {
                     const li = document.createElement('li');
-                    li.textContent = `${pair.deposit.player}${pair.deposit.accountId ? ` (acc ${pair.deposit.accountId})` : ''} → ${pair.withdraw.player}${pair.withdraw.accountId ? ` (acc ${pair.withdraw.accountId})` : ''}: ${formatPrice(pair.withdraw.amount)}$ (${pair.deposit.timestampStr} → ${pair.withdraw.timestampStr})`;
+                    const amountLabel = formatPrice(pair.amount ?? pair.withdraw.amount);
+                    const balanceNote = pair.matchedByBalance ? ' (учтена комиссия/остаток)' : '';
+                    li.textContent = `${pair.deposit.player}${pair.deposit.accountId ? ` (acc ${pair.deposit.accountId})` : ''} → ${pair.withdraw.player}${pair.withdraw.accountId ? ` (acc ${pair.withdraw.accountId})` : ''}: ${amountLabel}$ (${pair.deposit.timestampStr} → ${pair.withdraw.timestampStr})${balanceNote}`;
                     pairsList.appendChild(li);
                 });
 

@@ -104,6 +104,44 @@
             .join('|');
     }
 
+    async function loadCustomPriceFile() {
+        try {
+            const customUrl = chrome.runtime.getURL('custom_prices.json');
+            const response = await fetch(customUrl);
+            if (!response.ok) {
+                if (response.status !== 404) {
+                    debug('Custom prices file not loaded:', response.status);
+                }
+                return;
+            }
+
+            const text = (await response.text()).trim();
+            let parsedCount = 0;
+
+            try {
+                const parsed = JSON.parse(text);
+                parsedCount += processParsedPrices(parsed);
+            } catch {
+                const lines = text.split('\n');
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const data = JSON.parse(line);
+                        parsedCount += processParsedPrices(data);
+                    } catch (err) {
+                        console.warn(DEBUG_PREFIX, 'Failed to parse custom price line:', line, err);
+                    }
+                }
+            }
+
+            if (parsedCount > 0) {
+                debug(`Custom prices applied from custom_prices.json (${parsedCount} entries)`);
+            }
+        } catch (error) {
+            debug('Failed to load custom price file:', error);
+        }
+    }
+
     async function loadPrices() {
         try {
             const pricesUrl = chrome.runtime.getURL('prices.jsonl');
@@ -147,6 +185,9 @@
 
             debug(`Prices map created with ${pricesMap.size} entries`);
             debug('First 5 price IDs:', Array.from(pricesMap.keys()).slice(0, 5));
+
+            // Загружаем кастомный файл (общий для раздачи)
+            await loadCustomPriceFile();
 
             // Загружаем сохраненные переопределения цен
             await loadPriceOverrides();

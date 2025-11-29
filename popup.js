@@ -55,49 +55,121 @@
         return await response.text();
     }
 
+    function normalizePriceValue(value) {
+        if (value === null || value === undefined) return null;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (typeof value === 'string') {
+            const numeric = Number(value.replace(/\s+/g, ''));
+            if (Number.isFinite(numeric)) return numeric;
+        }
+        if (typeof value === 'object') {
+            if (value.price !== undefined) {
+                const nested = normalizePriceValue(value.price);
+                if (nested !== null) return nested;
+            }
+            const min = Number(value.min ?? value[0] ?? value['1']);
+            const max = Number(value.max ?? value[1] ?? value['2']);
+            const normalized = {};
+            if (Number.isFinite(min)) normalized.min = min;
+            if (Number.isFinite(max)) normalized.max = max;
+            return Object.keys(normalized).length ? normalized : null;
+        }
+        return null;
+    }
+
+    function buildPriceMapFromPayload(text) {
+        const map = {};
+
+        const tryAdd = (id, info) => {
+            if (!id) return;
+            const priceValue = normalizePriceValue(info?.price ?? info);
+            if (priceValue === null) return;
+            const entry = { price: priceValue };
+            if (info && typeof info === 'object') {
+                if (info.name) entry.name = info.name;
+                if (info.updated) entry.updated = info.updated;
+            }
+            map[String(id)] = entry;
+        };
+
+        let parsed = null;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            parsed = null;
+        }
+
+        if (parsed) {
+            if (Array.isArray(parsed)) {
+                parsed.forEach(item => {
+                    const itemId = item?.id ?? item?.item_id ?? item?.name;
+                    tryAdd(itemId, item);
+                });
+            } else if (typeof parsed === 'object') {
+                Object.entries(parsed).forEach(([key, value]) => {
+                    if (value && typeof value === 'object' && (value.id !== undefined || value.item_id !== undefined)) {
+                        tryAdd(value.id ?? value.item_id, value);
+                    } else {
+                        tryAdd(key, value);
+                    }
+                });
+            }
+        }
+
+        if (Object.keys(map).length === 0) {
+            const lines = text.split('\n').filter(line => line.trim());
+            lines.forEach(line => {
+                try {
+                    const item = JSON.parse(line);
+                    const itemId = item?.id ?? item?.item_id ?? item?.name;
+                    tryAdd(itemId, item);
+                } catch {
+                    // ignore broken lines
+                }
+            });
+        }
+
+        return map;
+    }
+
     async function exportPricesWithOverrides() {
         try {
-            showStatus('Загрузка цен...', false);
+            showStatus('Готовим custom_prices.json...', false);
 
-            // Загружаем базовый prices.jsonl
             const basePricesText = await loadPricesJsonl();
-            const lines = basePricesText.trim().split('\n');
+            const priceMap = buildPriceMapFromPayload(basePricesText);
 
-            // Загружаем переопределения
             const result = await new Promise((resolve) => {
                 chrome.storage.local.get('priceOverrides', resolve);
             });
             const overrides = result.priceOverrides || {};
+            const nowTs = Math.floor(Date.now() / 1000);
 
-            // Обновляем цены с переопределениями
-            const updatedLines = lines.map((line) => {
-                if (!line.trim()) return line;
-                try {
-                    const data = JSON.parse(line);
-                    if (data.id && overrides[String(data.id)] !== undefined) {
-                        data.price = overrides[String(data.id)];
-                        data.updated = Math.floor(Date.now() / 1000);
-                    }
-                    return JSON.stringify(data);
-                } catch (err) {
-                    return line;
-                }
+            Object.entries(overrides).forEach(([id, value]) => {
+                const normalized = normalizePriceValue(value);
+                if (normalized === null) return;
+                const existing = priceMap[id] || {};
+                priceMap[id] = {
+                    ...existing,
+                    price: normalized,
+                    name: existing.name,
+                    updated: nowTs
+                };
             });
 
-            const updatedContent = updatedLines.join('\n');
+            const updatedContent = JSON.stringify(priceMap, null, 2);
 
-            // Скачиваем файл
-            const blob = new Blob([updatedContent], { type: 'text/plain' });
+            const blob = new Blob([updatedContent], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `prices_${new Date().toISOString().slice(0, 10)}.jsonl`;
+            a.download = 'custom_prices.json';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            showStatus(`Экспортировано! Обновлено ${Object.keys(overrides).length} товаров`);
+            showStatus(`Сохранено: ${Object.keys(overrides).length} кастомных цен`);
             setTimeout(() => showStatus(''), 2500);
         } catch (error) {
             console.error('Export error:', error);

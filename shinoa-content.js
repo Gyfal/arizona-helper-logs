@@ -2554,38 +2554,34 @@
 
         // Добавляем кнопку для Email
         if (emailCell && !emailCell.querySelector('.shinoa-email-history-btn')) {
-            const fetchAndDisplayEmail = async () => {
-                // Создаем временную кнопку "Загрузка..."
-                const tempBtn = document.createElement('button');
-                tempBtn.className = 'shinoa-email-history-btn';
-                tempBtn.textContent = 'Загрузка 0/0';
-                tempBtn.disabled = true;
-                tempBtn.style.marginLeft = '8px';
-                emailCell.appendChild(tempBtn);
-
-                try {
-                    const emailData = await getEmailData(accountId, serverId, regDate, (completed, total) => {
-                        tempBtn.textContent = `Загрузка ${completed}/${total}`;
-                    });
-
-                    // Удаляем временную кнопку
-                    tempBtn.remove();
-
-                    // Отображаем данные
-                    displayEmailData(emailCell, emailData, playerData);
-                } catch (error) {
-                    tempBtn.textContent = 'Ошибка';
-                    tempBtn.disabled = false;
-                    debug('Error loading email data:', error);
-                }
-            };
-
             const emailButton = document.createElement('button');
             emailButton.className = 'shinoa-email-history-btn';
             emailButton.textContent = 'Получить историю';
             emailButton.type = 'button';
             emailButton.style.marginLeft = '8px';
             emailButton.dataset.accountId = accountId;
+
+            const fetchAndDisplayEmail = async () => {
+                if (emailButton.dataset.loading === 'true') return;
+                emailButton.dataset.loading = 'true';
+                emailButton.disabled = true;
+                emailButton.textContent = 'Загрузка 0/0';
+
+                try {
+                    const emailData = await getEmailData(accountId, serverId, regDate, (completed, total) => {
+                        emailButton.textContent = `Загрузка ${completed}/${total}`;
+                    });
+
+                    // Отображаем данные (кнопка будет заменена на кнопку истории)
+                    displayEmailData(emailCell, emailData, playerData);
+                } catch (error) {
+                    emailButton.textContent = 'Ошибка, повторить';
+                    emailButton.disabled = false;
+                    delete emailButton.dataset.loading;
+                    debug('Error loading email data:', error);
+                }
+            };
+
             emailButton.addEventListener('click', fetchAndDisplayEmail);
             emailCell.appendChild(emailButton);
         }
