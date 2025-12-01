@@ -127,6 +127,15 @@
         console.log(PRICES_PREFIX, ...args)
     }
 
+    // Выполняет fn сразу или после готовности DOM, с одноразовой подпиской
+    function runWhenReady(fn) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', fn, { once: true });
+        } else {
+            fn();
+        }
+    }
+
     // Функция для парсинга даты из формата "YYYY-MM-DD" или "YYYY-MM-DD HH:MM[:SS]"
     function parseDate(dateStr) {
         if (!dateStr) return null;
@@ -1259,11 +1268,7 @@ function getVisibleText(node) {
         return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', addSplitButton);
-    } else {
-        addSplitButton();
-    }
+    runWhenReady(addSplitButton);
 
     // Добавляем наблюдатель за изменениями DOM на случай динамической загрузки
     const observer = new MutationObserver(() => {
@@ -2059,11 +2064,7 @@ function getVisibleText(node) {
     });
 
     // Запуск загрузки цен при загрузке страницы
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', loadPriceData);
-    } else {
-        loadPriceData();
-    }
+    runWhenReady(loadPriceData);
 
     // Запускаем наблюдатель за изменениями
     pricesObserver.observe(document.body, {
@@ -3041,11 +3042,7 @@ function getVisibleText(node) {
         loadMultiUrlConfig();
 
         // Создаем кнопку для управления
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', createMultiUrlToggleButton);
-        } else {
-            createMultiUrlToggleButton();
-        }
+        runWhenReady(createMultiUrlToggleButton);
 
         console.log(DEBUG_PREFIX, 'Multi-URL инициализирован', multiUrlState);
     }
@@ -3728,11 +3725,143 @@ function getVisibleText(node) {
         schedulePreloadCheck();
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', setupInfiniteScroll);
-    } else {
-        setupInfiniteScroll();
+    runWhenReady(setupInfiniteScroll);
+
+    // ============================================
+    // Сохранение выбранного лимита логов
+    // ============================================
+
+    const LOGS_LIMIT_STORAGE_KEY = 'logsPreferredLimit';
+    const LOGS_LIMIT_DEFAULT = 100;
+    const LOGS_LIMIT_ALLOWED = [100, 500, 1000];
+    const LOGS_LIMIT_SELECT_SELECTOR = 'select[name="limit"]';
+
+    function parseLogsLimit(value) {
+        if (value === null || value === undefined) {
+            return null;
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return null;
+        }
+        return LOGS_LIMIT_ALLOWED.includes(num) ? num : null;
     }
+
+    function loadPreferredLogsLimit() {
+        return new Promise((resolve) => {
+            try {
+                if (!chrome?.storage?.local?.get) {
+                    resolve(LOGS_LIMIT_DEFAULT);
+                    return;
+                }
+                chrome.storage.local.get({ [LOGS_LIMIT_STORAGE_KEY]: LOGS_LIMIT_DEFAULT }, (result) => {
+                    const raw = result?.[LOGS_LIMIT_STORAGE_KEY];
+                    const parsed = parseLogsLimit(raw);
+                    resolve(parsed ?? LOGS_LIMIT_DEFAULT);
+                });
+            } catch (error) {
+                debugLog('Не удалось загрузить сохранённый лимит логов', error);
+                resolve(LOGS_LIMIT_DEFAULT);
+            }
+        });
+    }
+
+    function savePreferredLogsLimit(limit) {
+        try {
+            if (!chrome?.storage?.local?.set) return;
+            chrome.storage.local.set({ [LOGS_LIMIT_STORAGE_KEY]: limit });
+        } catch (error) {
+            debugLog('Не удалось сохранить выбранный лимит логов', error);
+        }
+    }
+
+    function syncLimitParamWithUrl(limit, { reloadIfChanged = false } = {}) {
+        const normalized = parseLogsLimit(limit) ?? LOGS_LIMIT_DEFAULT;
+        const currentUrl = new URL(window.location.href);
+        const currentParam = currentUrl.searchParams.get('limit');
+        const hasLimit = currentUrl.searchParams.has('limit');
+
+        if (normalized === LOGS_LIMIT_DEFAULT) {
+            if (hasLimit) {
+                currentUrl.searchParams.delete('limit');
+                const nextHref = currentUrl.toString();
+                if (reloadIfChanged) {
+                    window.location.replace(nextHref);
+                    return true;
+                }
+                history.replaceState(null, '', nextHref);
+            }
+            return false;
+        }
+
+        if (currentParam === String(normalized)) {
+            return false;
+        }
+
+        currentUrl.searchParams.set('limit', String(normalized));
+        const nextHref = currentUrl.toString();
+        if (reloadIfChanged) {
+            window.location.replace(nextHref);
+            return true;
+        }
+        history.replaceState(null, '', nextHref);
+        return false;
+    }
+
+    function setupLimitSelect(preferredLimit, onChange) {
+        const select = document.querySelector(LOGS_LIMIT_SELECT_SELECTOR);
+        if (!select || select.dataset.logsLimitEnhanced === 'true') {
+            return;
+        }
+
+        select.dataset.logsLimitEnhanced = 'true';
+
+        const targetLimit = parseLogsLimit(preferredLimit) ?? LOGS_LIMIT_DEFAULT;
+        const matchingOption = Array.from(select.options).find(opt => opt.value === String(targetLimit));
+        if (matchingOption && select.value !== matchingOption.value) {
+            select.value = matchingOption.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        select.addEventListener('change', () => {
+            const selected = parseLogsLimit(select.value) ?? LOGS_LIMIT_DEFAULT;
+            onChange(selected);
+        });
+    }
+
+    async function initPreferredLimitControl() {
+        const params = new URLSearchParams(window.location.search);
+        const urlLimit = parseLogsLimit(params.get('limit'));
+        const storedLimit = await loadPreferredLogsLimit();
+        let preferredLimit = urlLimit ?? storedLimit ?? LOGS_LIMIT_DEFAULT;
+
+        if (urlLimit !== null && urlLimit !== storedLimit) {
+            savePreferredLogsLimit(urlLimit);
+        }
+
+        const redirectTriggered = syncLimitParamWithUrl(preferredLimit, {
+            reloadIfChanged: urlLimit === null && preferredLimit > LOGS_LIMIT_DEFAULT
+        });
+        if (redirectTriggered) {
+            return;
+        }
+
+        const handleLimitChange = (nextLimit) => {
+            preferredLimit = nextLimit;
+            savePreferredLogsLimit(nextLimit);
+            syncLimitParamWithUrl(nextLimit, { reloadIfChanged: false });
+        };
+
+        const applySelectEnhancement = () => setupLimitSelect(preferredLimit, handleLimitChange);
+        applySelectEnhancement();
+
+        const limitObserver = new MutationObserver(applySelectEnhancement);
+        limitObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    runWhenReady(() => {
+        void initPreferredLimitControl();
+    });
 
     // ============================================
     // ФУНКЦИОНАЛ ИСТОРИИ ВЗАИМОДЕЙСТВИЙ
@@ -4112,19 +4241,11 @@ function getVisibleText(node) {
             }
         };
 
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', tryScroll);
-        } else {
-            tryScroll();
-        }
+        runWhenReady(tryScroll);
     }
 
     // Добавляем кнопки при загрузке страницы
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', addInteractionButtons);
-    } else {
-        addInteractionButtons();
-    }
+    runWhenReady(addInteractionButtons);
 
     // Наблюдаем за динамическими изменениями
     const interactionObserver = new MutationObserver(() => {

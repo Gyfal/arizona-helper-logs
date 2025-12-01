@@ -252,8 +252,19 @@
         setTimeout(() => {
             if (document.getElementById(BUTTON_ID)) return;
             const { periodFrom, periodTo } = findDateFields();
-            const form = periodFrom?.closest('form') || periodTo?.closest('form') || document.querySelector('form');
             const applyButton = findApplyButton();
+            const hasFilters = Boolean(applyButton) || (periodFrom && periodTo);
+            const hasLogsTable = Boolean(document.querySelector('table.table-hover'));
+
+            // Не добавляем кнопку на страницах авторизации/без логов и фильтров
+            if (!hasFilters && !hasLogsTable) {
+                return;
+            }
+
+            const form = periodFrom?.closest('form') ||
+                periodTo?.closest('form') ||
+                applyButton?.closest('form') ||
+                document.querySelector('form');
             const btn = createSuspiciousButton();
             insertControlButton(btn, applyButton, periodTo, form);
         }, 1200);
