@@ -16,6 +16,12 @@
   "content_scripts": [
     {
       "matches": ["https://arizonarp.logsparser.info/*"],
+      "js": ["logs-limit-prefetch.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://arizonarp.logsparser.info/*"],
       "js": ["content.js", "suspicious-deals.js"],
       "css": ["styles.css"],
       "run_at": "document_end",

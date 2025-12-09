@@ -7,6 +7,7 @@
     const geoCache = new Map(); // ip -> { text, lat, lon }
     const INLINE_STYLE_ID = 'shinoa-player-helper-inline-style';
     const ATTACHMENT_STYLE_ID = 'shinoa-attachment-helper-style';
+    const AUTH_NOTICE_STYLE_ID = 'shinoa-logs-auth-style';
     const MAX_SAFE_MONTHS = 5; // Максимальный безопасный период для логов (уменьшен из-за HTTP 504)
     const GEO_BATCH_SIZE = 30; // Размер batch для запросов геолокации
     let isPlayerRouteActive = false;
@@ -15,10 +16,19 @@
     let ipLogCache = new Map(); // accountId -> { ips: [...], loadStatus }
     let lastPlayerData = null; // Сохраняем последние данные игрока для переинициализации кнопок
     let tableObserver = null; // MutationObserver для отслеживания изменений таблицы
+    let lastIPAnnotation = null; // Stores last IP payload to reapply after table rerenders
+    let ipAnnotationScheduled = false;
+    let logsAuthNoticeShown = false;
 
-    async function sendMessageSafe(message, retries = 1) {
-        if (!chrome?.runtime?.id) {
-            throw new Error('Extension context unavailable');
+    async function sendMessageSafe(message, retries = 1, retryDelayMs = 300) {
+        const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+
+        if (!chrome?.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+            if (retries > 0) {
+                await wait(retryDelayMs);
+                return sendMessageSafe(message, retries - 1, retryDelayMs * 2);
+            }
+            throw new Error('Extension context unavailable (проверьте что расширение включено и имеет доступ к сайту)');
         }
 
         const attempt = () => new Promise((resolve, reject) => {
@@ -37,11 +47,11 @@
         } catch (error) {
             const isContextInvalid =
                 typeof error.message === 'string' &&
-                error.message.toLowerCase().includes('extension context invalidated');
+                /extension context (invalidated|closed|unavailable)/i.test(error.message);
 
             if (isContextInvalid && retries > 0) {
-                await new Promise(res => setTimeout(res, 250));
-                return sendMessageSafe(message, retries - 1);
+                await wait(retryDelayMs);
+                return sendMessageSafe(message, retries - 1, retryDelayMs * 2);
             }
             throw error;
         }
@@ -98,6 +108,143 @@
 
     function debug(...args) {
         console.log(DEBUG_PREFIX, ...args);
+    }
+
+    function isExtensionContextUnavailable(error) {
+        const message = (error?.message || error || '').toString().toLowerCase();
+        return message.includes('extension context unavailable');
+    }
+
+    function notifyExtensionContextUnavailableOnce() {
+        if (window.__shinoaExtCtxWarned) return;
+        window.__shinoaExtCtxWarned = true;
+        alert('Расширение недоступно. Проверьте, что Arizona Logs & Player Helper включён и имеет доступ к logs.shinoa.tech, затем обновите страницу.');
+    }
+
+    function isLogsAuthError(error, contextUrl = '') {
+        const message = (error?.message || error || '').toString().toLowerCase();
+        const url = (contextUrl || '').toString().toLowerCase();
+
+        const mentionsLogs = message.includes('logsparser') || url.includes('logsparser');
+        const corsHints = message.includes('access-control-allow-origin') ||
+            message.includes('cors') ||
+            message.includes('failed to fetch') ||
+            message.includes('blocked by client') ||
+            message.includes('authenticator') ||
+            message.includes('network error');
+        const authStatusHints = message.includes('http 401') ||
+            message.includes('http 403') ||
+            message.includes('unauthorized') ||
+            message.includes('forbidden');
+
+        return mentionsLogs && (corsHints || authStatusHints);
+    }
+
+    function wrapLogsFetchError(error, contextUrl = '') {
+        const normalizedError = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+
+        if (isLogsAuthError(normalizedError, contextUrl)) {
+            notifyLogsAuthRequired();
+            const authError = new Error('Требуется авторизация на сайте логов');
+            authError.code = 'LOGS_AUTH_REQUIRED';
+            return authError;
+        }
+
+        return normalizedError;
+    }
+
+    function ensureAuthNoticeStyles() {
+        if (document.getElementById(AUTH_NOTICE_STYLE_ID)) {
+            return;
+        }
+
+        const style = document.createElement('style');
+        style.id = AUTH_NOTICE_STYLE_ID;
+        style.textContent = `
+.shinoa-logs-auth-notice {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    background: #1f2a3a;
+    color: #fff;
+    padding: 14px 16px 14px 18px;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+    max-width: 340px;
+    z-index: 99999;
+    font-size: 13px;
+    line-height: 1.45;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.shinoa-logs-auth-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+    font-size: 14px;
+}
+
+.shinoa-logs-auth-close {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    line-height: 1;
+}
+.shinoa-logs-auth-close:hover {
+    color: #d5e4ff;
+}
+        `.trim();
+
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function notifyLogsAuthRequired() {
+        if (logsAuthNoticeShown) {
+            return;
+        }
+
+        ensureAuthNoticeStyles();
+
+        if (!document.body) {
+            return;
+        }
+
+        const existing = document.getElementById('shinoa-logs-auth-notice');
+        if (existing) {
+            existing.remove();
+        }
+
+        const notice = document.createElement('div');
+        notice.id = 'shinoa-logs-auth-notice';
+        notice.className = 'shinoa-logs-auth-notice';
+        notice.setAttribute('role', 'alert');
+
+        const title = document.createElement('div');
+        title.className = 'shinoa-logs-auth-title';
+        title.textContent = 'Нужна авторизация на логах';
+
+        const text = document.createElement('div');
+        text.textContent = 'Откройте arizonarp.logsparser.info в этом браузере, выполните вход и повторите загрузку логов.';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'shinoa-logs-auth-close';
+        closeBtn.textContent = 'x';
+        closeBtn.addEventListener('click', () => {
+            notice.remove();
+            logsAuthNoticeShown = false;
+        });
+
+        notice.appendChild(closeBtn);
+        notice.appendChild(title);
+        notice.appendChild(text);
+
+        document.body.appendChild(notice);
+        logsAuthNoticeShown = true;
     }
 
     function injectNetworkInterceptor() {
@@ -185,6 +332,7 @@
         const lastGeo = geoMap[info.last_ip?.trim()];
         const distanceKm = computeDistanceKm(regGeo, lastGeo);
 
+        rememberIPAnnotation(ipCandidates, geoMap, distanceKm);
         annotateRows(ipCandidates, geoMap, distanceKm);
         insertIPLogRow(); // Добавляем строку IP LOG
 
@@ -446,6 +594,74 @@
         return result;
     }
 
+    function rememberIPAnnotation(candidates, geoMap, distanceKm) {
+        const preparedCandidates = (candidates || []).map((entry) => {
+            const rawValue = entry?.value;
+            const normalizedValue = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+
+            return {
+                label: entry?.label || '',
+                value: normalizedValue,
+                lookupKeys: Array.isArray(entry?.lookupKeys) ? [...entry.lookupKeys] : [entry?.label || '']
+            };
+        });
+
+        lastIPAnnotation = {
+            candidates: preparedCandidates,
+            geoMap: { ...(geoMap || {}) },
+            distanceKm
+        };
+    }
+
+    function reapplyIPAnnotations() {
+        if (!lastIPAnnotation) {
+            return;
+        }
+
+        annotateRows(lastIPAnnotation.candidates, lastIPAnnotation.geoMap, lastIPAnnotation.distanceKm);
+    }
+
+    function needsIPAnnotation() {
+        if (!lastIPAnnotation || !lastIPAnnotation.candidates?.length) {
+            return false;
+        }
+
+        return lastIPAnnotation.candidates.some((entry) => {
+            const ip = (entry.value ?? '').trim();
+            if (!ip || ip === '0.0.0.0') {
+                return false;
+            }
+
+            const row = findRowByLabels(entry.lookupKeys || [entry.label]);
+            if (!row || !row.cells || row.cells.length < 2) {
+                return false;
+            }
+
+            const cell = row.cells[1];
+            return !cell.querySelector('.shinoa-ip-container');
+        });
+    }
+
+    function scheduleIPAnnotation() {
+        if (ipAnnotationScheduled) {
+            return;
+        }
+
+        ipAnnotationScheduled = true;
+        const scheduler = window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
+        scheduler(() => {
+            ipAnnotationScheduled = false;
+
+            if (!lastIPAnnotation) {
+                return;
+            }
+
+            if (needsIPAnnotation()) {
+                reapplyIPAnnotations();
+            }
+        });
+    }
+
     function annotateRows(candidates, geoMap, distanceKm) {
         ensureInlineStyle();
 
@@ -612,15 +828,22 @@
                 }
 
             } catch (error) {
-                newButton.textContent = 'Ошибка';
+                const isAuthError = error?.code === 'LOGS_AUTH_REQUIRED' || isLogsAuthError(error);
+
+                newButton.textContent = isAuthError ? 'Нужна авторизация' : 'Ошибка';
                 newButton.disabled = false;
                 debug('Error loading IP log data:', error);
 
-                // Добавляем возможность повторить
-                setTimeout(() => {
-                    newButton.textContent = 'Повторить';
-                    cachedIPLogData = null; // Сбрасываем кеш для повторной попытки
-                }, 2000);
+                if (isAuthError) {
+                    notifyLogsAuthRequired();
+                } else {
+                    // Добавляем возможность повторить
+                    setTimeout(() => {
+                        newButton.textContent = 'Повторить';
+                        cachedIPLogData = null; // Сбрасываем кеш для повторной попытки
+                    }, 2000);
+                }
+                cachedIPLogData = null;
             }
         });
 
@@ -745,6 +968,8 @@
             if (!active) {
                 // Очищаем данные при уходе со страницы игрока
                 lastPlayerData = null;
+                lastIPAnnotation = null;
+                ipAnnotationScheduled = false;
                 if (tableObserver) {
                     tableObserver.disconnect();
                     tableObserver = null;
@@ -876,17 +1101,22 @@
 
         debug('Fetching attachment logs', url.toString());
 
-        const response = await sendMessageSafe({
-            type: 'fetch-logs',
-            url: url.toString()
-        }, 2);
+        let response;
+        try {
+            response = await sendMessageSafe({
+                type: 'fetch-logs',
+                url: url.toString()
+            }, 2);
+        } catch (error) {
+            throw wrapLogsFetchError(error, url.toString());
+        }
 
         if (!response) {
-            throw new Error('No response from service worker');
+            throw wrapLogsFetchError(new Error('No response from service worker'), url.toString());
         }
 
         if (!response.ok) {
-            throw new Error(response.error || 'Unknown error');
+            throw wrapLogsFetchError(new Error(response.error || 'Unknown error'), url.toString());
         }
 
         return response.html;
@@ -903,17 +1133,22 @@
 
         debug('Fetching email logs', url.toString());
 
-        const response = await sendMessageSafe({
-            type: 'fetch-logs',
-            url: url.toString()
-        }, 2);
+        let response;
+        try {
+            response = await sendMessageSafe({
+                type: 'fetch-logs',
+                url: url.toString()
+            }, 2);
+        } catch (error) {
+            throw wrapLogsFetchError(error, url.toString());
+        }
 
         if (!response) {
-            throw new Error('No response from service worker');
+            throw wrapLogsFetchError(new Error('No response from service worker'), url.toString());
         }
 
         if (!response.ok) {
-            throw new Error(response.error || 'Unknown error');
+            throw wrapLogsFetchError(new Error(response.error || 'Unknown error'), url.toString());
         }
 
         return response.html;
@@ -1289,17 +1524,17 @@
                 },
                 (response) => {
                     if (chrome.runtime.lastError) {
-                        reject(new Error(chrome.runtime.lastError.message));
+                        reject(wrapLogsFetchError(new Error(chrome.runtime.lastError.message), url.toString()));
                         return;
                     }
 
                     if (!response) {
-                        reject(new Error('No response from service worker'));
+                        reject(wrapLogsFetchError(new Error('No response from service worker'), url.toString()));
                         return;
                     }
 
                     if (!response.ok) {
-                        reject(new Error(response.error || 'Unknown error'));
+                        reject(wrapLogsFetchError(new Error(response.error || 'Unknown error'), url.toString()));
                         return;
                     }
 
@@ -1335,7 +1570,11 @@
                 fetchIPLoginLogs(accountId, serverId, period.start, period.end, page)
                     .then(html => parseIPLoginLogs(html))
                     .catch(error => {
-                        debug('Error fetching page', page, error);
+                        const wrappedError = wrapLogsFetchError(error);
+                        if (wrappedError?.code === 'LOGS_AUTH_REQUIRED') {
+                            throw wrappedError;
+                        }
+                        debug('Error fetching page', page, wrappedError);
                         return []; // Возвращаем пустой массив при ошибке
                     })
             );
@@ -1369,6 +1608,7 @@
         let completedPeriods = 0;
         let successCount = 0;
         let failedCount = 0;
+        let authError = null;
 
         // ВАЖНО: Загружаем периоды ПОСЛЕДОВАТЕЛЬНО
         for (const period of periods) {
@@ -1393,8 +1633,13 @@
 
                 debug(`Period ${completedPeriods + 1}/${periods.length}: ${periodIPs.length} IPs`);
             } catch (error) {
+                const wrappedError = wrapLogsFetchError(error);
+                if (wrappedError?.code === 'LOGS_AUTH_REQUIRED') {
+                    authError = wrappedError;
+                    break;
+                }
                 failedCount++;
-                debug('Error fetching period', period, error);
+                debug('Error fetching period', period, wrappedError);
             }
 
             completedPeriods++;
@@ -1406,6 +1651,10 @@
                     total: periods.length
                 });
             }
+        }
+
+        if (authError) {
+            throw authError;
         }
 
         // Создаем карту уникальных IP с метаданными
@@ -1549,13 +1798,17 @@
                     return { success: true, events };
                 })
                 .catch(error => {
+                    const wrappedError = wrapLogsFetchError(error);
+                    if (wrappedError?.code === 'LOGS_AUTH_REQUIRED') {
+                        throw wrappedError;
+                    }
                     completed++;
                     failedCount++;
                     if (onProgress) {
                         onProgress(completed, periods.length);
                     }
-                    debug('Error fetching period', period, error);
-                    return { success: false, events: [], error };
+                    debug('Error fetching period', period, wrappedError);
+                    return { success: false, events: [], error: wrappedError };
                 })
         );
 
@@ -1623,13 +1876,17 @@
                     return { success: true, events };
                 })
                 .catch(error => {
+                    const wrappedError = wrapLogsFetchError(error);
+                    if (wrappedError?.code === 'LOGS_AUTH_REQUIRED') {
+                        throw wrappedError;
+                    }
                     completed++;
                     failedCount++;
                     if (onProgress) {
                         onProgress(completed, periods.length);
                     }
-                    debug('Error fetching email period', period, error);
-                    return { success: false, events: [], error };
+                    debug('Error fetching email period', period, wrappedError);
+                    return { success: false, events: [], error: wrappedError };
                 })
         );
 
@@ -2347,6 +2604,10 @@
 
         // Создаем observer для отслеживания изменений в таблице
         tableObserver = new MutationObserver((mutations) => {
+            if (lastIPAnnotation && needsIPAnnotation()) {
+                scheduleIPAnnotation();
+            }
+
             // Проверяем, появились ли строки "ID ВКонтакте", "ID Telegram" или "E-Mail"
             const hasVKRow = Array.from(document.querySelectorAll('tr')).some(row => {
                 const firstCell = row.cells?.[0];
@@ -2387,6 +2648,24 @@
                     setupAttachmentButtonsWithData(lastPlayerData);
                 }
             }
+
+            // Гарантируем, что строка IP LOG появляется, даже если таблица обновилась позже
+            if (lastPlayerData) {
+                const lastIPRow = findRowByLabels(['Last IP']);
+                let ipLogRow = findRowByLabels(['IP LOG']);
+
+                // Добавляем строку IP LOG, если появилась строка Last IP
+                if (lastIPRow && !ipLogRow) {
+                    insertIPLogRow();
+                    ipLogRow = findRowByLabels(['IP LOG']);
+                }
+
+                // Настраиваем кнопку, если строка есть, но кнопка ещё не привязана к аккаунту
+                const ipLogButton = ipLogRow?.querySelector('.shinoa-ip-log-btn');
+                if (ipLogButton && ipLogButton.dataset.accountId !== lastPlayerData.accountId) {
+                    setupIPLogButton(lastPlayerData);
+                }
+            }
         });
 
         // Наблюдаем за изменениями в контейнере
@@ -2394,6 +2673,10 @@
             childList: true,
             subtree: true
         });
+
+        if (lastIPAnnotation && needsIPAnnotation()) {
+            scheduleIPAnnotation();
+        }
     }
 
     function setupAttachmentButtonsWithData(playerData) {
@@ -2530,9 +2813,30 @@
                     displayAttachmentData(telegramCell, data.telegram, 'telegram', playerData);
                 }
             } catch (error) {
-                // В случае ошибки показываем на обеих кнопках
-                if (vkButton) vkButton.textContent = 'Ошибка';
-                if (telegramButton) telegramButton.textContent = 'Ошибка';
+                const isExtCtxError = isExtensionContextUnavailable(error);
+                const isAuthError = error?.code === 'LOGS_AUTH_REQUIRED' || isLogsAuthError(error);
+
+                if (vkButton) {
+                    vkButton.textContent = isExtCtxError
+                        ? 'Расширение выключено'
+                        : (isAuthError ? 'Нужна авторизация' : 'Ошибка');
+                    vkButton.disabled = false;
+                }
+                if (telegramButton) {
+                    telegramButton.textContent = isExtCtxError
+                        ? 'Расширение выключено'
+                        : (isAuthError ? 'Нужна авторизация' : 'Ошибка');
+                    telegramButton.disabled = false;
+                }
+
+                if (isAuthError) {
+                    notifyLogsAuthRequired();
+                }
+
+                if (isExtCtxError) {
+                    notifyExtensionContextUnavailableOnce();
+                }
+
                 debug('Error loading attachment data:', error);
             }
         };
@@ -2575,9 +2879,23 @@
                     // Отображаем данные (кнопка будет заменена на кнопку истории)
                     displayEmailData(emailCell, emailData, playerData);
                 } catch (error) {
-                    emailButton.textContent = 'Ошибка, повторить';
+                    const isExtCtxError = isExtensionContextUnavailable(error);
+                    const isAuthError = error?.code === 'LOGS_AUTH_REQUIRED' || isLogsAuthError(error);
+
+                    emailButton.textContent = isExtCtxError
+                        ? 'Расширение выключено'
+                        : (isAuthError ? 'Нужна авторизация' : 'Ошибка, повторить');
                     emailButton.disabled = false;
                     delete emailButton.dataset.loading;
+
+                    if (isAuthError) {
+                        notifyLogsAuthRequired();
+                    }
+
+                    if (isExtCtxError) {
+                        notifyExtensionContextUnavailableOnce();
+                    }
+
                     debug('Error loading email data:', error);
                 }
             };

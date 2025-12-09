@@ -194,6 +194,14 @@
         return formatDate(new Date(utcMs));
     }
 
+    function safeDecode(value, fallback = null) {
+        try {
+            return decodeURIComponent(value);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
     // Функция для добавления минут к строке даты в серверном TZ (MSK)
     function addMinutesToDateString(dateStr, minutesToAdd, tzOffsetMin = SERVER_TZ_OFFSET_MINUTES) {
         const parsed = parseDateString(dateStr);
@@ -3747,31 +3755,61 @@ function getVisibleText(node) {
         return LOGS_LIMIT_ALLOWED.includes(num) ? num : null;
     }
 
+    function readLogsLimitFromLocalStorage() {
+        try {
+            const raw = localStorage.getItem(LOGS_LIMIT_STORAGE_KEY);
+            return parseLogsLimit(raw);
+        } catch (error) {
+            debugLog('Не удалось прочитать лимит логов из localStorage', error);
+            return null;
+        }
+    }
+
     function loadPreferredLogsLimit() {
         return new Promise((resolve) => {
+            const localStored = readLogsLimitFromLocalStorage();
+
             try {
                 if (!chrome?.storage?.local?.get) {
-                    resolve(LOGS_LIMIT_DEFAULT);
+                    resolve(localStored ?? LOGS_LIMIT_DEFAULT);
                     return;
                 }
-                chrome.storage.local.get({ [LOGS_LIMIT_STORAGE_KEY]: LOGS_LIMIT_DEFAULT }, (result) => {
+                chrome.storage.local.get({ [LOGS_LIMIT_STORAGE_KEY]: localStored ?? LOGS_LIMIT_DEFAULT }, (result) => {
                     const raw = result?.[LOGS_LIMIT_STORAGE_KEY];
                     const parsed = parseLogsLimit(raw);
-                    resolve(parsed ?? LOGS_LIMIT_DEFAULT);
+                    const resolved = parsed ?? localStored ?? LOGS_LIMIT_DEFAULT;
+
+                    if (parsed !== null) {
+                        try {
+                            localStorage.setItem(LOGS_LIMIT_STORAGE_KEY, String(parsed));
+                        } catch (error) {
+                            debugLog('Не удалось сохранить лимит логов в localStorage после загрузки', error);
+                        }
+                    }
+
+                    resolve(resolved);
                 });
             } catch (error) {
                 debugLog('Не удалось загрузить сохранённый лимит логов', error);
-                resolve(LOGS_LIMIT_DEFAULT);
+                resolve(localStored ?? LOGS_LIMIT_DEFAULT);
             }
         });
     }
 
     function savePreferredLogsLimit(limit) {
+        const normalized = parseLogsLimit(limit) ?? LOGS_LIMIT_DEFAULT;
+
         try {
             if (!chrome?.storage?.local?.set) return;
-            chrome.storage.local.set({ [LOGS_LIMIT_STORAGE_KEY]: limit });
+            chrome.storage.local.set({ [LOGS_LIMIT_STORAGE_KEY]: normalized });
         } catch (error) {
             debugLog('Не удалось сохранить выбранный лимит логов', error);
+        }
+
+        try {
+            localStorage.setItem(LOGS_LIMIT_STORAGE_KEY, String(normalized));
+        } catch (error) {
+            debugLog('Не удалось сохранить лимит логов в localStorage', error);
         }
     }
 
@@ -3874,7 +3912,9 @@ function getVisibleText(node) {
         const rows = tableBody.querySelectorAll('tr');
         rows.forEach(row => {
             // Пропускаем, если кнопка уже добавлена
-            if (row.querySelector('.interaction-history-btn')) return;
+            if (row.querySelector('.interaction-history-btn')) {
+                return;
+            }
 
             const cells = row.querySelectorAll('td');
             if (cells.length < 2) return;
@@ -3891,7 +3931,14 @@ function getVisibleText(node) {
             button.className = 'interaction-history-btn';
             button.textContent = '🔍';
             button.title = 'Показать историю взаимодействий за выбранный период';
-            button.addEventListener('click', () => showInteractionHistory(row, links, cells[0]));
+            button.addEventListener('click', () => {
+                try {
+                    showInteractionHistory(row, links, cells[0]);
+                } catch (error) {
+                    console.error(DEBUG_PREFIX, 'Interaction history failed', error);
+                    alert('Не удалось открыть историю взаимодействий. Проверьте консоль для деталей.');
+                }
+            });
 
             // Вставляем кнопку в начало ячейки действия
             actionCell.insertBefore(button, actionCell.firstChild);
@@ -3917,7 +3964,10 @@ function getVisibleText(node) {
         const players = Array.from(playerLinks)
             .map((link) => {
                 const match = link.href.match(/player=([^&]+)/);
-                return match ? decodeURIComponent(match[1]) : null;
+                if (match) {
+                    return safeDecode(match[1], match[1]) || link.textContent?.trim() || null;
+                }
+                return link.textContent?.trim() || null;
             })
             .filter(Boolean)
             .slice(0, 2);
@@ -4078,6 +4128,11 @@ function getVisibleText(node) {
             panel.append(longRangeSection);
         }
         panelCell.appendChild(panel);
+
+        if (!row?.parentNode) {
+            alert('Строка таблицы больше не доступна. Обновите страницу и попробуйте снова.');
+            return;
+        }
         panelRow.appendChild(panelCell);
 
         row.classList.add('interaction-history-active-row');
