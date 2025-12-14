@@ -1,6 +1,12 @@
 (function() {
     'use strict';
 
+    // Не выполняем логику в iframe, чтобы не плодить редиректы/наблюдатели в дочерних фреймах.
+    // Особенно важно, потому что другие функции расширения создают iframe на этом же домене.
+    if (window.top !== window.self) {
+        return;
+    }
+
     const LOGS_LIMIT_STORAGE_KEY = 'logsPreferredLimit';
     const LOGS_LIMIT_DEFAULT = 100;
     const LOGS_LIMIT_ALLOWED = [100, 500, 1000];

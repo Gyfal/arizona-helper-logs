@@ -1,14 +1,56 @@
 ﻿// Arizona RP Logs Period Splitter
-// Автоматическое разбиение больших периодов на части
-// + отображение цен предметов
 
 (function() {
     'use strict';
+    let pageIsHiding = false;
+    const onPageHideCallbacks = [];
+
+    function onPageHide(callback) {
+        if (typeof callback === 'function') {
+            onPageHideCallbacks.push(callback);
+        }
+    }
+
+    window.addEventListener('pagehide', (event) => {
+        pageIsHiding = true;
+        for (const callback of onPageHideCallbacks) {
+            try {
+                callback(event);
+            } catch (_error) {
+                // ignore
+            }
+        }
+    });
+
+    window.addEventListener('beforeunload', () => {
+        pageIsHiding = true;
+    }, { once: true });
+
+    window.addEventListener('pageshow', (event) => {
+        if (event.persisted) {
+            pageIsHiding = false;
+        }
+    });
+
+    // Утилита debounce для предотвращения частых вызовов
+    function debounce(fn, delay) {
+        let timeoutId = null;
+        return function(...args) {
+            if (timeoutId) clearTimeout(timeoutId);
+            timeoutId = setTimeout(() => {
+                timeoutId = null;
+                fn.apply(this, args);
+            }, delay);
+        };
+    }
+
+    // WeakSet для отслеживания обработанных строк таблицы
+    const processedRows = new WeakSet();
 
     // Максимальный безопасный период (по умолчанию)
     let maxSafeMonths = 9;
     let autoSplitEnabled = true; // По умолчанию включено
-    let csvButtonEnabled = true; // По умолчанию включено
+    let csvButtonEnabled = false; // По умолчанию включено
 
     const DEBUG_PREFIX = '[LogsPeriodSplitter]';
     const PRICES_PREFIX = '[ItemPrices]';
@@ -450,7 +492,7 @@
 
             // Проверяем, включено ли автоматическое разбиение
             if (autoSplitEnabled) {
-                autoSplitPeriod();
+                autoSplitPeriod(event);
             } else {
                 // Если выключено, выполняем обычную отправку формы
                 debugLog('Авто-разбиение выключено, используем стандартную отправку');
@@ -550,7 +592,7 @@
         });
 
         if (periodFrom && periodTo && periodFrom === periodTo) {
-            debugLog('Выявлено совпадение полей периода, запускаем дополнительный поиск поля "Период до"');
+            // debugLog('Выявлено совпадение полей периода, запускаем дополнительный поиск поля "Период до"');
 
             const directMax = document.querySelector('input[name="max_period"]');
             if (directMax && directMax !== periodFrom) {
@@ -596,7 +638,6 @@
         const formData = new FormData(form);
         const debugEntries = [];
         for (const [key, value] of formData.entries()) {
-            // Приводим значение к строке, игнорируем null/undefined
             if (value !== null && value !== undefined) {
                 params.append(key, String(value));
                 debugEntries.push({ key, value: String(value) });
@@ -618,8 +659,11 @@
     }
 
     // Главная функция для автоматического разбиения
-    function autoSplitPeriod() {
-        let form = null;
+    function autoSplitPeriod(event) {
+        // Получаем форму из события или ищем на странице
+        let form = event?.target instanceof HTMLFormElement
+            ? event.target
+            : document.querySelector('form');
 
         try {
             let { periodFrom, periodTo } = findDateFields();
@@ -632,11 +676,14 @@
 
             if (!periodFrom || !periodTo) {
                 alert('Браузер заблокировал часть вкладок. На странице появился список ссылок для ручного открытия.');
-                safeSubmit(document.querySelector('form'), 'period-fields-not-found');
+                safeSubmit(form, 'period-fields-not-found');
                 return;
             }
 
-            form = periodFrom.closest('form') || periodTo.closest('form') || document.querySelector('form');
+            // Если форма не определена из события, берём из полей дат
+            if (!form) {
+                form = periodFrom.closest('form') || periodTo.closest('form');
+            }
 
             let startDateStr = getInputValue(periodFrom);
             let endDateStr = getInputValue(periodTo);
@@ -718,6 +765,11 @@
             const hasSplit = periods.length > 1;
 
             const baseParams = collectFormParams(form);
+            debugLog('Собранные параметры формы для split', {
+                paramsCount: [...baseParams.keys()].length,
+                params: Object.fromEntries(baseParams.entries())
+            });
+
             const periodFromName = periodFrom.getAttribute('name');
             const periodToName = periodTo.getAttribute('name');
             const periodFromKeys = periodFromName ? [periodFromName] : ['min_period'];
@@ -1278,18 +1330,6 @@ function getVisibleText(node) {
 
     runWhenReady(addSplitButton);
 
-    // Добавляем наблюдатель за изменениями DOM на случай динамической загрузки
-    const observer = new MutationObserver(() => {
-        if (!document.getElementById(AUTO_SPLIT_BUTTON_ID) || !document.getElementById(EXPORT_CSV_BUTTON_ID)) {
-            addSplitButton();
-        }
-    });
-
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
-
     // ============================================
     // ФУНКЦИОНАЛ ОТОБРАЖЕНИЯ ЦЕН ПРЕДМЕТОВ
     // ============================================
@@ -1740,6 +1780,7 @@ function getVisibleText(node) {
 
     // Поиск и добавление цен к предметам
     function processItemPrices() {
+        if (pageIsHiding) return;
         // Регулярные выражения для поиска ID в разных форматах:
         // (ID: 1637  | или [id: 1425]
         const idPatterns = [
@@ -2044,41 +2085,8 @@ function getVisibleText(node) {
         pricesLog(`Добавлено цен на страницу: ${processedCount}`);
     }
 
-    // Наблюдатель за динамическими изменениями для добавления цен
-    const pricesObserver = new MutationObserver((mutations) => {
-        // Проверяем, добавились ли новые элементы с предметами
-        let hasNewItems = false;
-
-        for (const mutation of mutations) {
-            if (mutation.addedNodes.length > 0) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const text = node.textContent || '';
-                        // Проверяем разные форматы: (ID: или [id: или получил/потерял
-                        if ((text.includes('ID:') || text.includes('id:')) &&
-                            (text.includes('Кол-во') || text.includes('количестве') || text.includes('получил') || text.includes('потерял'))) {
-                            hasNewItems = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (hasNewItems) break;
-        }
-
-        if (hasNewItems && (itemPricesMap.size > 0 || vehiclePricesMap.size > 0)) {
-            setTimeout(processItemPrices, 100);
-        }
-    });
-
     // Запуск загрузки цен при загрузке страницы
     runWhenReady(loadPriceData);
-
-    // Запускаем наблюдатель за изменениями
-    pricesObserver.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
 
     // ============================================
     // ОБХОД БАГА СО СКЛАДОМ ДОМА + ПОИСК ПОДОЗРИТЕЛЬНЫХ
@@ -3890,11 +3898,8 @@ function getVisibleText(node) {
             syncLimitParamWithUrl(nextLimit, { reloadIfChanged: false });
         };
 
-        const applySelectEnhancement = () => setupLimitSelect(preferredLimit, handleLimitChange);
-        applySelectEnhancement();
-
-        const limitObserver = new MutationObserver(applySelectEnhancement);
-        limitObserver.observe(document.body, { childList: true, subtree: true });
+        // Вызываем один раз (единый observer вызовет при изменениях DOM)
+        setupLimitSelect(preferredLimit, handleLimitChange);
     }
 
     runWhenReady(() => {
@@ -3906,24 +3911,29 @@ function getVisibleText(node) {
     // ============================================
 
     function addInteractionButtons() {
+        if (pageIsHiding) return;
         const tableBody = document.querySelector('table.table-hover tbody');
         if (!tableBody) return;
 
         const rows = tableBody.querySelectorAll('tr');
         rows.forEach(row => {
-            // Пропускаем, если кнопка уже добавлена
-            if (row.querySelector('.interaction-history-btn')) {
-                return;
-            }
+            // Быстрая проверка через WeakSet вместо querySelector
+            if (processedRows.has(row)) return;
 
             const cells = row.querySelectorAll('td');
-            if (cells.length < 2) return;
+            if (cells.length < 2) {
+                processedRows.add(row);
+                return;
+            }
 
             const actionCell = cells[1];
             const links = actionCell.querySelectorAll('a[href*="player="]');
 
             // Нужен хотя бы один игрок в записи
-            if (links.length === 0) return;
+            if (links.length === 0) {
+                processedRows.add(row);
+                return;
+            }
 
             // Создаем кнопку
             const button = document.createElement('button');
@@ -3942,6 +3952,7 @@ function getVisibleText(node) {
 
             // Вставляем кнопку в начало ячейки действия
             actionCell.insertBefore(button, actionCell.firstChild);
+            processedRows.add(row);
         });
     }
 
@@ -4302,20 +4313,607 @@ function getVisibleText(node) {
     // Добавляем кнопки при загрузке страницы
     runWhenReady(addInteractionButtons);
 
-    // Наблюдаем за динамическими изменениями
-    const interactionObserver = new MutationObserver(() => {
-        addInteractionButtons();
-    });
-
-    interactionObserver.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
-
     maybeScrollToInteractionFocus();
 
-})();
+    // ============================================
+    // ФУНКЦИОНАЛ КОПИРОВАНИЯ И ДУБЛИКАТОВ EMAIL
+    // ============================================
 
+    // Реестр для отслеживания email дубликатов
+    const emailRegistry = new Map(); // email -> Set of { accountId, nickname, serverId }
+
+    // WeakSet для отслеживания обработанных строк привязок
+    const processedAttachmentRows = new WeakSet();
+
+    // Функции для работы с реестром email
+    function registerEmail(email, accId, nickname, serverId) {
+        if (!email || !accId) return;
+
+        if (!emailRegistry.has(email)) {
+            emailRegistry.set(email, new Set());
+        }
+
+        const accounts = emailRegistry.get(email);
+        // Используем accId как уникальный ключ (Set автоматически избегает дубликатов)
+        accounts.add(JSON.stringify({ accId, nickname, serverId }));
+
+        debugLog(`Registered email ${email} for account ${accId} (${nickname})`);
+    }
+
+    function getEmailDuplicates(email, currentAccId) {
+        if (!email || !emailRegistry.has(email)) return [];
+
+        const accounts = emailRegistry.get(email);
+        const duplicates = [];
+
+        for (const accountStr of accounts) {
+            const account = JSON.parse(accountStr);
+            // Исключаем текущий аккаунт из списка дубликатов по AccID
+            if (account.accId !== currentAccId) {
+                duplicates.push(account);
+            }
+        }
+
+        return duplicates;
+    }
+
+    function hasEmailDuplicates(email, currentAccId) {
+        return getEmailDuplicates(email, currentAccId).length > 0;
+    }
+
+    // Вспомогательная функция для создания кнопки копирования с emoji
+    function createCopyButton(textToCopy, emoji = '📋') {
+        const btn = document.createElement('button');
+        btn.className = 'attachment-copy-emoji-btn';
+        btn.textContent = emoji;
+        btn.title = 'Копировать';
+        btn.type = 'button';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                const originalText = btn.textContent;
+                btn.textContent = '✓';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                }, 1500);
+            }).catch(err => {
+                debugLog('Failed to copy:', err);
+            });
+        });
+        return btn;
+    }
+
+    // Обработка привязок соц. сетей и Email
+    function processAttachments() {
+        if (pageIsHiding) return;
+        const tableBody = document.querySelector('table.table-hover tbody');
+        if (!tableBody) return;
+
+        const rows = tableBody.querySelectorAll('tr');
+        const urlParams = new URLSearchParams(window.location.search);
+        const serverId = urlParams.get('server_number');
+
+        // ПЕРВЫЙ ПРОХОД: Собираем все email'ы в реестр
+        rows.forEach((row) => {
+            if (processedAttachmentRows.has(row)) return;
+
+            const cells = row.querySelectorAll('td');
+            if (cells.length < 2) return;
+
+            const actionCell = cells[1];
+            if (!actionCell) return;
+
+            const actionText = actionCell.textContent || '';
+
+            // Собираем email'ы
+            const emailAttachMatch = actionText.match(/Игрок\s+(\S+)\s+изменил\s+почту\s+(.+?)\s+на\s+(.+?)(?:\s|$)/i);
+            if (emailAttachMatch) {
+                const [_, nickname, oldEmail, newEmail] = emailAttachMatch;
+                const accountIds = extractAccountIds(row, 1);
+                const accId = accountIds.length > 0 ? accountIds[0] : null;
+
+                if (newEmail && accId) {
+                    registerEmail(newEmail, accId, nickname, serverId);
+                }
+            }
+        });
+
+        // ВТОРОЙ ПРОХОД: Добавляем кнопки с правильными индикаторами
+        rows.forEach((row) => {
+            if (processedAttachmentRows.has(row)) return;
+
+            const cells = row.querySelectorAll('td');
+            if (cells.length < 2) return;
+
+            const actionCell = cells[1];
+            if (!actionCell) return;
+
+            const actionText = actionCell.textContent || '';
+
+            // Проверяем VK привязку
+            const vkAttachMatch = actionText.match(/Игрок\s+(\S+)\s+привязывает\s+аккаунт\s+(.+?)\s+\(VK\s+ID:\s+(\d+)\)/i);
+            if (vkAttachMatch) {
+                const [_, nickname, fullName, vkId] = vkAttachMatch;
+                addAttachmentCopyButtons(actionCell, nickname, vkId, 'VK');
+                processedAttachmentRows.add(row);
+                return;
+            }
+
+            // Проверяем Telegram привязку
+            const tgAttachMatch = actionText.match(/Игрок\s+(\S+)\s+привязывает\s+аккаунт\s+(@\S+)\s+\(TG\s+ID:\s+(\d+)\)/i);
+            if (tgAttachMatch) {
+                const [_, nickname, tgUsername, tgId] = tgAttachMatch;
+                addAttachmentCopyButtons(actionCell, nickname, tgId, 'TG');
+                processedAttachmentRows.add(row);
+                return;
+            }
+
+            // Проверяем Email привязку
+            const emailAttachMatch = actionText.match(/Игрок\s+(\S+)\s+изменил\s+почту\s+(.+?)\s+на\s+(.+?)(?:\s|$)/i);
+            if (emailAttachMatch) {
+                const [_, nickname, oldEmail, newEmail] = emailAttachMatch;
+                const accountIds = extractAccountIds(row, 1);
+                const accId = accountIds.length > 0 ? accountIds[0] : null;
+
+                addEmailCopyButtons(actionCell, nickname, oldEmail, newEmail, accId);
+                processedAttachmentRows.add(row);
+                return;
+            }
+        });
+    }
+
+    function addAttachmentCopyButtons(cell, nickname, idValue, type) {
+        if (cell.querySelector('.attachment-copy-emoji-btn')) return;
+
+        // Ищем элемент <strong> с ником
+        const strongElements = cell.querySelectorAll('strong');
+        let nicknameElement = null;
+
+        for (const strong of strongElements) {
+            if (strong.textContent.trim() === nickname) {
+                nicknameElement = strong;
+                break;
+            }
+        }
+
+        if (nicknameElement) {
+            const nickCopyBtn = createCopyButton(nickname, '👤');
+            nicknameElement.parentNode.insertBefore(document.createTextNode(' '), nicknameElement.nextSibling);
+            nicknameElement.parentNode.insertBefore(nickCopyBtn, nicknameElement.nextSibling.nextSibling);
+        }
+
+        // Ищем ID в тексте ячейки
+        const idPattern = type === 'VK'
+            ? new RegExp(`VK\\s+ID:\\s+(${idValue})`)
+            : new RegExp(`TG\\s+ID:\\s+(${idValue})`);
+
+        const walker = document.createTreeWalker(
+            cell,
+            NodeFilter.SHOW_TEXT,
+            null,
+            false
+        );
+
+        let textNode;
+        while (textNode = walker.nextNode()) {
+            const match = textNode.textContent.match(idPattern);
+            if (match) {
+                const beforeText = textNode.textContent.substring(0, match.index + match[0].length);
+                const afterText = textNode.textContent.substring(match.index + match[0].length);
+
+                const beforeNode = document.createTextNode(beforeText);
+                const afterNode = document.createTextNode(afterText);
+                const idCopyBtn = createCopyButton(idValue, '📋');
+                idCopyBtn.style.marginLeft = '4px';
+
+                const parent = textNode.parentNode;
+                parent.insertBefore(beforeNode, textNode);
+                parent.insertBefore(document.createTextNode(' '), textNode);
+                parent.insertBefore(idCopyBtn, textNode);
+                if (afterText) {
+                    parent.insertBefore(afterNode, textNode);
+                }
+                parent.removeChild(textNode);
+                break;
+            }
+        }
+    }
+
+    function addEmailCopyButtons(cell, nickname, oldEmail, newEmail, accId) {
+        if (cell.querySelector('.attachment-copy-emoji-btn')) return;
+
+        // Ищем элемент <strong> с ником
+        const strongElements = cell.querySelectorAll('strong');
+        let nicknameElement = null;
+
+        for (const strong of strongElements) {
+            if (strong.textContent.trim() === nickname) {
+                nicknameElement = strong;
+                break;
+            }
+        }
+
+        if (nicknameElement) {
+            const nickCopyBtn = createCopyButton(nickname, '👤');
+            nicknameElement.parentNode.insertBefore(document.createTextNode(' '), nicknameElement.nextSibling);
+            nicknameElement.parentNode.insertBefore(nickCopyBtn, nicknameElement.nextSibling.nextSibling);
+        }
+
+        // Обходим текстовые узлы для поиска email адресов
+        const walker = document.createTreeWalker(
+            cell,
+            NodeFilter.SHOW_TEXT,
+            null,
+            false
+        );
+
+        let textNode;
+        const processedNodes = new Set();
+
+        while (textNode = walker.nextNode()) {
+            if (processedNodes.has(textNode)) continue;
+
+            const text = textNode.textContent;
+
+            // Ищем новый email (после "на ")
+            if (text.includes(newEmail)) {
+                const emailIndex = text.indexOf(newEmail);
+                const beforeText = text.substring(0, emailIndex + newEmail.length);
+                const afterText = text.substring(emailIndex + newEmail.length);
+
+                const beforeNode = document.createTextNode(beforeText);
+                const emailCopyBtn = createCopyButton(newEmail, '📧');
+                emailCopyBtn.style.marginLeft = '4px';
+
+                const parent = textNode.parentNode;
+                parent.insertBefore(beforeNode, textNode);
+                parent.insertBefore(document.createTextNode(' '), textNode);
+                parent.insertBefore(emailCopyBtn, textNode);
+
+                if (afterText.trim()) {
+                    const afterNode = document.createTextNode(afterText);
+                    parent.insertBefore(afterNode, textNode);
+                }
+
+                parent.removeChild(textNode);
+                processedNodes.add(textNode);
+                break;
+            }
+
+            // Ищем старый email (после "почту ")
+            if (oldEmail && oldEmail !== 'null' && oldEmail !== '' && text.includes(oldEmail)) {
+                const emailIndex = text.indexOf(oldEmail);
+                const beforeText = text.substring(0, emailIndex + oldEmail.length);
+                const afterText = text.substring(emailIndex + oldEmail.length);
+
+                const beforeNode = document.createTextNode(beforeText);
+                const emailCopyBtn = createCopyButton(oldEmail, '📧');
+                emailCopyBtn.style.marginLeft = '4px';
+
+                const parent = textNode.parentNode;
+                parent.insertBefore(beforeNode, textNode);
+                parent.insertBefore(document.createTextNode(' '), textNode);
+                parent.insertBefore(emailCopyBtn, textNode);
+
+                if (afterText.trim()) {
+                    const afterNode = document.createTextNode(afterText);
+                    parent.insertBefore(afterNode, textNode);
+                }
+
+                parent.removeChild(textNode);
+                processedNodes.add(textNode);
+            }
+        }
+
+        // Проверяем дубликаты и добавляем индикатор в конец ячейки
+        if (accId && hasEmailDuplicates(newEmail, accId)) {
+            const duplicates = getEmailDuplicates(newEmail, accId);
+            const dupIndicator = document.createElement('button');
+            dupIndicator.type = 'button';
+            dupIndicator.className = 'email-duplicate-indicator';
+            dupIndicator.dataset.email = newEmail;
+            dupIndicator.dataset.accId = accId;
+            dupIndicator.title = `Email дублируется на ${duplicates.length} аккаунт(ах)`;
+            dupIndicator.textContent = '⚠️';
+            dupIndicator.style.marginLeft = '4px';
+
+            dupIndicator.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                showEmailDuplicatesPopup(dupIndicator, newEmail, accId);
+            });
+
+            cell.appendChild(document.createTextNode(' '));
+            cell.appendChild(dupIndicator);
+        }
+    }
+
+
+    function showEmailDuplicatesPopup(anchorElement, email, currentAccId) {
+        // Удаляем существующий popup если есть
+        const existingPopup = document.querySelector('.email-duplicates-popup');
+        if (existingPopup) {
+            existingPopup.remove();
+            return; // Toggle behavior
+        }
+
+        const duplicates = getEmailDuplicates(email, currentAccId);
+        if (!duplicates.length) return;
+
+        const popup = document.createElement('div');
+        popup.className = 'email-duplicates-popup';
+
+        const header = document.createElement('div');
+        header.className = 'email-duplicates-popup-header';
+        header.textContent = `Дубликаты Email: ${email}`;
+        popup.appendChild(header);
+
+        const list = document.createElement('div');
+        list.className = 'email-duplicates-popup-list';
+
+        duplicates.forEach((account) => {
+            const item = document.createElement('div');
+            item.className = 'email-duplicates-popup-item';
+
+            const accountInfo = document.createElement('div');
+            accountInfo.className = 'email-duplicates-popup-account';
+
+            // Никнейм с AccID в скобках
+            const nicknameDiv = document.createElement('div');
+            nicknameDiv.className = 'email-duplicates-popup-label';
+            nicknameDiv.innerHTML = `<strong>Никнейм:</strong> ${account.nickname} <span style="color: #ffc107;">[${account.accId}]</span>`;
+            accountInfo.appendChild(nicknameDiv);
+
+            item.appendChild(accountInfo);
+            list.appendChild(item);
+        });
+
+        popup.appendChild(list);
+
+        // Функция для обновления позиции popup
+        function updatePosition() {
+            const rect = anchorElement.getBoundingClientRect();
+            popup.style.top = `${rect.bottom + 5}px`;
+            popup.style.left = `${rect.left}px`;
+        }
+
+        // Обработчик скролла для перемещения popup
+        function handleScroll() {
+            updatePosition();
+        }
+
+        // Закрытие при клике вне popup
+        function closePopup(e) {
+            if (!popup.contains(e.target)) {
+                popup.remove();
+                document.removeEventListener('click', closePopup);
+                window.removeEventListener('scroll', handleScroll, true);
+            }
+        }
+
+        setTimeout(() => {
+            document.addEventListener('click', closePopup);
+        }, 0);
+
+        // Добавляем обработчик скролла
+        window.addEventListener('scroll', handleScroll, true);
+
+        // Позиционирование popup
+        document.body.appendChild(popup);
+        popup.style.position = 'fixed';
+        updatePosition();
+    }
+
+    // Добавляем CSS стили
+    const attachmentStyles = document.createElement('style');
+    attachmentStyles.textContent = `
+        .attachment-copy-emoji-btn {
+            background: rgba(58, 187, 209, 0.15);
+            border: 1px solid rgba(58, 187, 209, 0.3);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 4px;
+            transition: all 0.2s ease;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: 4px;
+            user-select: none;
+        }
+
+        .attachment-copy-emoji-btn:hover {
+            background: rgba(58, 187, 209, 0.3);
+            border-color: rgba(58, 187, 209, 0.5);
+            transform: scale(1.1);
+        }
+
+        .attachment-copy-emoji-btn:active {
+            transform: scale(0.95);
+        }
+
+        .email-duplicate-indicator {
+            padding: 2px 6px;
+            background: rgba(255, 193, 7, 0.2);
+            border: 1px solid rgba(255, 193, 7, 0.5);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: 4px;
+            user-select: none;
+        }
+
+        .email-duplicate-indicator:hover {
+            background: rgba(255, 193, 7, 0.4);
+            border-color: rgba(255, 193, 7, 0.7);
+            transform: scale(1.1);
+        }
+
+        .email-duplicates-popup {
+            position: fixed;
+            background: #1c1f23;
+            border: 1px solid #ffc107;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            z-index: 10000;
+            min-width: 300px;
+            max-width: 500px;
+            max-height: 400px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .email-duplicates-popup-header {
+            padding: 12px 16px;
+            background: rgba(255, 193, 7, 0.2);
+            border-bottom: 1px solid #ffc107;
+            color: #ffc107;
+            font-weight: 600;
+            font-size: 13px;
+            word-break: break-all;
+        }
+
+        .email-duplicates-popup-list {
+            padding: 8px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .email-duplicates-popup-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #252a30;
+            border-radius: 4px;
+            border: 1px solid #3a3f45;
+        }
+
+        .email-duplicates-popup-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .email-duplicates-popup-account {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .email-duplicates-popup-label {
+            font-size: 12px;
+            color: rgba(236, 241, 249, 0.85);
+        }
+
+        .email-duplicates-popup-label strong {
+            color: #fff;
+        }
+    `;
+    document.head.appendChild(attachmentStyles);
+
+    // Запускаем обработку при загрузке страницы
+    runWhenReady(processAttachments);
+
+    // ============================================
+    // ЕДИНЫЙ ОПТИМИЗИРОВАННЫЙ MUTATIONOBSERVER
+    // ============================================
+
+    // Инициализация кнопок split/csv - один раз при загрузке
+    runWhenReady(() => {
+        addSplitButton();
+    });
+
+    // Объединённый debounced обработчик DOM изменений
+    // Наблюдает только за tbody таблицы для оптимизации
+    //
+    // Важно: MutationObserver может вызвать callback несколько раз подряд (например,
+    // сначала при добавлении новых строк, затем при пост-обработке цен/вложений).
+    // Обычный debounce возьмёт "последние" mutations и может пропустить добавление кнопок.
+    // Поэтому накапливаем mutations в буфер и обрабатываем их пачкой.
+    let pendingDOMMutations = [];
+
+    const processDOMMutations = debounce(() => {
+        if (pageIsHiding) return;
+
+        const mutations = pendingDOMMutations;
+        pendingDOMMutations = [];
+
+        let shouldProcessPrices = false;
+        let shouldAddInteractionButtons = false;
+        let shouldProcessAttachments = false;
+
+        if (Array.isArray(mutations) && mutations.length > 0) {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+
+                    if (!shouldAddInteractionButtons) {
+                        if (node.matches?.('tr') || node.querySelector?.('tr')) {
+                            shouldAddInteractionButtons = true;
+                            shouldProcessAttachments = true;
+                        }
+                    }
+
+                    if (!shouldProcessPrices) {
+                        const text = node.textContent || '';
+                        if ((text.includes('ID:') || text.includes('id:')) &&
+                            (text.includes('Кол-во') || text.includes('количестве') || text.includes('получил') || text.includes('потерял'))) {
+                            shouldProcessPrices = true;
+                        }
+                    }
+
+                    if (shouldProcessPrices && shouldAddInteractionButtons && shouldProcessAttachments) {
+                        break;
+                    }
+                }
+                if (shouldProcessPrices && shouldAddInteractionButtons && shouldProcessAttachments) {
+                    break;
+                }
+            }
+        } else {
+            // Fallback: если по какой-то причине mutations не переданы
+            shouldAddInteractionButtons = true;
+            shouldProcessAttachments = true;
+        }
+
+        if (shouldProcessPrices && (itemPricesMap.size > 0 || vehiclePricesMap.size > 0)) {
+            processItemPrices();
+        }
+
+        if (shouldAddInteractionButtons) {
+            addInteractionButtons();
+        }
+
+        if (shouldProcessAttachments) {
+            processAttachments();
+        }
+    }, 150);
+
+    const unifiedObserver = new MutationObserver((mutations) => {
+        if (pageIsHiding) return;
+        if (Array.isArray(mutations) && mutations.length > 0) {
+            pendingDOMMutations.push(...mutations);
+        }
+        processDOMMutations();
+    });
+
+    runWhenReady(() => {
+        // Наблюдаем только за tbody таблицы вместо всего document.body
+        const tableBody = document.querySelector('table.table-hover tbody');
+        if (tableBody) {
+            unifiedObserver.observe(tableBody, { childList: true, subtree: true });
+            debugLog('MutationObserver установлен на tbody таблицы');
+        } else {
+            debugLog('tbody таблицы не найден, observer не установлен');
+        }
+    });
+
+
+})();
 
 
 

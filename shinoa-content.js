@@ -2070,6 +2070,7 @@
         const headerText = document.createElement('span');
         headerText.textContent = `История IP адресов (${ipData.length})`;
         header.appendChild(headerText);
+        headerText.style.flex = '1 1 auto';
 
         // Индикатор загрузки геолокации
         const geoStatus = document.createElement('span');
@@ -2079,6 +2080,74 @@
             geoStatus.style.color = '#ffcc00';
         }
         header.appendChild(geoStatus);
+
+        const exportBtn = document.createElement('button');
+        exportBtn.type = 'button';
+        exportBtn.className = 'shinoa-iplog-export-btn';
+        exportBtn.textContent = 'Экспорт TSV';
+        exportBtn.title = 'Скопировать IP\tМестоположение\tКол-во входов';
+        exportBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+
+            const sanitizeTSVCell = (value) => {
+                if (value === null || value === undefined) return '';
+                return String(value).replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+            };
+
+            const lines = [];
+            for (const entry of ipData) {
+                const ip = sanitizeTSVCell(entry.ip);
+                const location = sanitizeTSVCell(entry.geo?.text ?? '');
+                const count = sanitizeTSVCell(entry.count ?? '');
+                lines.push([ip, location, count].join('\t'));
+            }
+            const tsv = lines.length ? (lines.join('\r\n') + '\r\n') : '';
+
+            const copyToClipboard = async (text) => {
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    }
+                } catch {}
+
+                try {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    textarea.style.top = '0';
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    const ok = document.execCommand && document.execCommand('copy');
+                    textarea.remove();
+                    return !!ok;
+                } catch {
+                    return false;
+                }
+            };
+
+            const originalText = exportBtn.textContent;
+            exportBtn.disabled = true;
+            exportBtn.textContent = 'Копирую...';
+
+            const copied = await copyToClipboard(tsv);
+            if (copied) {
+                exportBtn.textContent = 'Скопировано';
+            } else {
+                exportBtn.textContent = 'Не удалось';
+                try {
+                    window.prompt('Не удалось скопировать автоматически. Скопируйте TSV вручную:', tsv);
+                } catch {}
+            }
+
+            setTimeout(() => {
+                exportBtn.disabled = false;
+                exportBtn.textContent = originalText;
+            }, 2000);
+        });
+        header.appendChild(exportBtn);
 
         popup.appendChild(header);
 
@@ -3174,6 +3243,40 @@
     font-weight: 600;
     font-size: 14px;
     color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.shinoa-iplog-geo-status {
+    font-weight: 500;
+    font-size: 12px;
+    color: rgba(236, 241, 249, 0.7);
+    white-space: nowrap;
+}
+
+.shinoa-iplog-export-btn {
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid #444;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+
+.shinoa-iplog-export-btn:hover {
+    background: #3abbd1;
+    border-color: #3abbd1;
+}
+
+.shinoa-iplog-export-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
 }
 
 .shinoa-iplog-table-container {

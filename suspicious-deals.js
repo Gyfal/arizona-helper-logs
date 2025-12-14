@@ -1417,13 +1417,9 @@
     }
 
     function init() {
+        // addSuspiciousButton уже использует setTimeout(1200ms) для добавления кнопки
+        // MutationObserver не нужен - кнопка добавится один раз при загрузке
         addSuspiciousButton();
-        const observer = new MutationObserver(() => {
-            if (!document.getElementById(BUTTON_ID)) {
-                addSuspiciousButton();
-            }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
     }
 
     if (document.readyState === 'loading') {
