@@ -101,14 +101,13 @@
         return -1;
     }
 
-    function parseInteger(value) {
-        const match = String(value || '').match(/\d+/);
-        return match ? Number(match[0]) : 0;
-    }
-
     function parseOptionalInteger(value) {
         const match = String(value || '').match(/\d+/);
         return match ? Number(match[0]) : null;
+    }
+
+    function parseInteger(value) {
+        return parseOptionalInteger(value) ?? 0;
     }
 
     function parseForumId(value) {

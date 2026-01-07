@@ -359,8 +359,6 @@
 
     function addPriceColumn(table) {
         try {
-            if (!table) return;
-
             if (!table.__shinoaPriceInitialized) {
                 table.__shinoaPriceInitialized = true;
                 debug('Initializing price column for table');
@@ -648,11 +646,9 @@
         const table = cell.closest('table');
         pauseTableUpdates(table);
 
-        // ????????? ???????????? ??????????
         const originalContent = cell.textContent;
         const originalStyle = cell.style.cssText;
 
-        // ??????? input
         const input = document.createElement('input');
         input.type = 'text';
         input.value = String(priceValue).replace(/\s+/g, '');
@@ -674,7 +670,6 @@
             const newValue = input.value.trim();
 
             if (newValue === '') {
-                // ?????? ???????? - ??????? ???????????????
                 savePriceOverride(itemId, null);
             } else {
                 const numValue = parseInt(newValue.replace(/\D/g, ''), 10);
@@ -683,7 +678,6 @@
                 }
             }
 
-            // ??????????????? ??? ????????? ???????????
             cell.textContent = '';
             const priceInfo = getPriceForItem(itemId);
             applyPriceToCell(cell, priceInfo, itemId);

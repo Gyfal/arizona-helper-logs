@@ -25,6 +25,9 @@
     };
     const DEFAULT_SUSPICIOUS_BUTTON_ENABLED = false;
     const MINUTE_IN_MS = 60 * 1000;
+    const BUTTON_INSERT_DELAY_MS = 1200;
+    const MIN_POOL_REMAINING_VALUE = 0.01;
+    const MAX_CHRONOLOGY_EVENTS = 12;
     const HOUSE_SECTION_ID = 'suspiciousHouseSection';
 
     let itemPricesMap = new Map();
@@ -299,7 +302,7 @@
                 document.querySelector('form');
             const btn = createSuspiciousButton();
             insertControlButton(btn, applyButton, periodTo, form);
-        }, 1200);
+        }, BUTTON_INSERT_DELAY_MS);
     }
 
     function extractQuantityFromText(text) {
@@ -997,7 +1000,7 @@
 
                     source.remainingValue -= delta;
                     remaining -= delta;
-                    if (source.remainingValue <= 0.01) pool.shift();
+                    if (source.remainingValue <= MIN_POOL_REMAINING_VALUE) pool.shift();
                 }
 
                 if (suspiciousAmount >= threshold && sources.length > 0) {
@@ -1222,7 +1225,7 @@
                 chronology.style.borderTop = '1px solid rgba(255,255,255,0.08)';
                 chronology.style.paddingTop = '6px';
                 chronology.appendChild(document.createElement('li')).textContent = 'Хронология:';
-                find.chronology.slice(-12).forEach(ev => {
+                find.chronology.slice(-MAX_CHRONOLOGY_EVENTS).forEach(ev => {
                     const li = document.createElement('li');
                     li.textContent = `${ev.timestampStr} · ${ev.direction === 'in' ? 'положил' : 'взял'} ${formatPrice(ev.amount)}$ · ${ev.player}${ev.accountId ? ` (acc ${ev.accountId})` : ''}`;
                     chronology.appendChild(li);

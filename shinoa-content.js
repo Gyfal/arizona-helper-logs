@@ -7,7 +7,6 @@
     const geoCache = new Map(); // ip -> { text, lat, lon }
     const INLINE_STYLE_ID = 'shinoa-player-helper-inline-style';
     const ATTACHMENT_STYLE_ID = 'shinoa-attachment-helper-style';
-    const AUTH_NOTICE_STYLE_ID = 'shinoa-logs-auth-style';
     const NOTIFICATION_STYLE_ID = 'shinoa-helper-notification-style';
     const NOTIFICATION_CONTAINER_ID = 'shinoa-helper-notification-container';
     const MAX_SAFE_MONTHS = 5; // Максимальный безопасный период для логов (уменьшен из-за HTTP 504)
@@ -323,100 +322,6 @@
         }
         notificationSeen.add(key);
         return showNotification({ key, ...options });
-    }
-
-    function ensureAuthNoticeStyles() {
-        if (document.getElementById(AUTH_NOTICE_STYLE_ID)) {
-            return;
-        }
-
-        const style = document.createElement('style');
-        style.id = AUTH_NOTICE_STYLE_ID;
-        style.textContent = `
-.shinoa-logs-auth-notice {
-    position: fixed;
-    top: 18px;
-    right: 18px;
-    background: #1f2a3a;
-    color: #fff;
-    padding: 14px 16px 14px 18px;
-    border-radius: 10px;
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
-    max-width: 340px;
-    z-index: 99999;
-    font-size: 13px;
-    line-height: 1.45;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.shinoa-logs-auth-title {
-    font-weight: 700;
-    margin-bottom: 6px;
-    font-size: 14px;
-}
-
-.shinoa-logs-auth-close {
-    position: absolute;
-    top: 8px;
-    right: 10px;
-    background: none;
-    border: none;
-    color: #fff;
-    font-size: 16px;
-    cursor: pointer;
-    line-height: 1;
-}
-.shinoa-logs-auth-close:hover {
-    color: #d5e4ff;
-}
-        `.trim();
-
-        (document.head || document.documentElement).appendChild(style);
-    }
-
-    function notifyLogsAuthRequired() {
-        if (logsAuthNoticeShown) {
-            return;
-        }
-
-        ensureAuthNoticeStyles();
-
-        if (!document.body) {
-            return;
-        }
-
-        const existing = document.getElementById('shinoa-logs-auth-notice');
-        if (existing) {
-            existing.remove();
-        }
-
-        const notice = document.createElement('div');
-        notice.id = 'shinoa-logs-auth-notice';
-        notice.className = 'shinoa-logs-auth-notice';
-        notice.setAttribute('role', 'alert');
-
-        const title = document.createElement('div');
-        title.className = 'shinoa-logs-auth-title';
-        title.textContent = 'Нужна авторизация на логах';
-
-        const text = document.createElement('div');
-        text.textContent = 'Откройте arizonarp.logsparser.info в этом браузере, выполните вход и повторите загрузку логов.';
-
-        const closeBtn = document.createElement('button');
-        closeBtn.type = 'button';
-        closeBtn.className = 'shinoa-logs-auth-close';
-        closeBtn.textContent = 'x';
-        closeBtn.addEventListener('click', () => {
-            notice.remove();
-            logsAuthNoticeShown = false;
-        });
-
-        notice.appendChild(closeBtn);
-        notice.appendChild(title);
-        notice.appendChild(text);
-
-        document.body.appendChild(notice);
-        logsAuthNoticeShown = true;
     }
 
     function notifyLogsAuthRequired() {
